@@ -10,6 +10,7 @@ import { TemplatesPage } from './pages/production/TemplatesPage';
 import { DocumentWritingPage } from './pages/production/DocumentWritingPage';
 import { VideoScriptPage } from './pages/production/VideoScriptPage';
 import { ProductionLibraryPage } from './pages/production/ProductionLibraryPage';
+import { ContentCalendarPage } from './pages/production/ContentCalendarPage';
 import { AdCreationPage } from './pages/production/AdCreationPage';
 import { BlogProductionPage } from './features/blog/BlogProductionPage';
 
@@ -44,7 +45,7 @@ export default function App() {
 
       {/* 콘텐츠 관리 - PHASE 2에서 이전 예정 */}
       <Route path="/library" element={<RequireAuth><ProductionLibraryPage /></RequireAuth>} />
-      <Route path="/calendar" element={<RequireAuth><StubPage title="콘텐츠 캘린더" phase="PHASE 2" /></RequireAuth>} />
+      <Route path="/calendar" element={<RequireAuth><ContentCalendarPage /></RequireAuth>} />
       <Route path="/templates" element={<RequireAuth><TemplatesPage /></RequireAuth>} />
 
       {/* 자산 - PHASE 2 이후 */}
