@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { AppSwitcher } from './AppSwitcher';
 import { useAuth } from '../context/AuthContext';
-import { useAdvertiserContext } from '../context/AdvertiserContext';
+import { ALL_ADVERTISERS_ID, useAdvertiserContext } from '../context/AdvertiserContext';
 
 const NAV_GROUPS: { label: string; items: { to: string; label: string }[] }[] = [
   { label: '', items: [{ to: '/', label: '홈' }] },
@@ -85,7 +85,7 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           <div className="cs-topbar-actions">
             <select className="cs-select" value={selectedId} onChange={e => setSelectedId(e.target.value)} disabled={loading} aria-label="광고주 선택">
-              {!advertisers.length && <option value="">{loading ? '불러오는 중...' : '광고주 없음'}</option>}
+              <option value={ALL_ADVERTISERS_ID}>{loading ? '전체 보기 · 불러오는 중...' : `전체 보기${advertisers.length ? ` (${advertisers.length})` : ''}`}</option>
               {advertisers.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
             <span className="cs-user-name">{user?.name}</span>

@@ -2,13 +2,17 @@ import { Link } from 'react-router-dom';
 import { useAdvertiserContext } from '../context/AdvertiserContext';
 
 export function HomePage() {
-  const { selected } = useAdvertiserContext();
+  const { selected, isAllSelected, advertisers } = useAdvertiserContext();
 
   return (
     <div>
       <h1 style={{ fontSize: 22, marginBottom: 4 }}>HOWTOM 콘텐츠 제작소</h1>
       <p style={{ color: 'var(--text-muted)', marginBottom: 24 }}>
-        {selected ? `현재 광고주: ${selected.name}` : '상단에서 광고주를 선택해주세요.'}
+        {isAllSelected
+          ? `현재 범위: 전체 광고주${advertisers.length ? ` (${advertisers.length}개)` : ''}`
+          : selected
+            ? `현재 광고주: ${selected.name}`
+            : '등록된 광고주가 없습니다.'}
       </p>
 
       {/* 아래 3개 수치는 레퍼런스/제작물 기능이 아직 이 앱으로 이전되지 않은 PHASE 1이라
