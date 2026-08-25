@@ -176,23 +176,52 @@ export function BlogProductionPage(){
 }
 
 function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setSelectedAdvertiser,query,setQuery,onCreate,onOpen,onDelete,notice}:{advertisers:ReturnType<typeof useAdvertisers>[0];projects:BlogProject[];allProjects:BlogProject[];selectedAdvertiser:string;setSelectedAdvertiser:(v:string)=>void;query:string;setQuery:(v:string)=>void;onCreate:()=>void;onOpen:(id:string)=>void;onDelete:(id:string)=>void;notice:string}){
-  const counts={month:allProjects.filter(p=>new Date(p.createdAt).getMonth()===new Date().getMonth()).length,writing:allProjects.filter(p=>['draft','writing'].includes(p.status)).length,review:allProjects.filter(p=>p.status==='review'||p.status==='revision').length,published:allProjects.filter(p=>p.status==='published').length,warnings:allProjects.reduce((n,p)=>n+(p.complianceIssues?.filter(x=>x.severity!=='info').length||0),0)};
+  const now=new Date();
+  const scopedProjects=selectedAdvertiser?allProjects.filter(p=>p.advertiserId===selectedAdvertiser):allProjects;
+  const counts={
+    month:scopedProjects.filter(p=>{const d=new Date(p.createdAt);return !Number.isNaN(d.getTime())&&d.getFullYear()===now.getFullYear()&&d.getMonth()===now.getMonth();}).length,
+    writing:scopedProjects.filter(p=>['draft','writing'].includes(p.status)).length,
+    review:scopedProjects.filter(p=>p.status==='review'||p.status==='revision').length,
+    published:scopedProjects.filter(p=>p.status==='published').length,
+    warnings:scopedProjects.reduce((n,p)=>n+(p.complianceIssues?.filter(x=>x.severity!=='info').length||0),0)
+  };
   return <div className="blog26-page"><PageHeader title="블로그 제작" description="광고주별 콘텐츠 제작부터 SEO·업종별 규정 검수·의료광고 심의 관리까지 한곳에서 진행합니다." action={<button className="btn primary" onClick={onCreate} disabled={!advertisers.length}><Plus size={15}/> 새 블로그 제작</button>}/>{notice&&<div className="blog26-notice">{notice}</div>}
     {!advertisers.length?<section className="card blog26-zero"><Sparkles size={36}/><h2>아직 등록된 광고주가 없습니다.</h2><p>HOWTOM 유니버스는 샘플 데이터 없이 시작합니다. 광고주를 먼저 등록하면 블로그 제작 워크스페이스를 사용할 수 있습니다.</p><a className="btn primary" href={`${import.meta.env.VITE_UNIVERSE_URL || 'http://localhost:3000'}/advertisers`}><Plus size={15}/> 유니버스에서 광고주 등록</a></section>:<>
     <section className="blog26-kpis">{[['이번 달 제작',counts.month],['작성 중',counts.writing],['검토 필요',counts.review],['발행 완료',counts.published],['규정 경고',counts.warnings]].map(([label,value])=><article className="card" key={String(label)}><span>{label}</span><b>{value}</b></article>)}</section>
     <section className="card blog26-dashboard-toolbar"><div className="blog26-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="제목·키워드 검색"/></div><select value={selectedAdvertiser} onChange={e=>setSelectedAdvertiser(e.target.value)}><option value="">전체 광고주</option>{advertisers.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select><button className="btn primary" onClick={onCreate} disabled={!selectedAdvertiser}><Plus size={15}/> 새 글</button></section>
     <section className="card blog26-project-table"><div className="blog26-panel-title"><div><h3>저장한 글</h3><small>서버에 저장된 블로그 프로젝트</small></div></div>{projects.length?<div className="table-scroll"><table><thead><tr><th>제목</th><th>광고주</th><th>업종</th><th>키워드</th><th>검수</th><th>상태</th><th>수정일</th><th/></tr></thead><tbody>{projects.map(p=><tr key={p.projectId}><td><b>{p.selectedTitle||'제목 미정'}</b></td><td>{p.advertiserName}</td><td>{p.industry}</td><td>{p.primaryKeyword||'-'}</td><td><span className={`blog26-pill ${p.complianceIssues?.some(x=>x.severity==='danger')?'danger':p.complianceStatus==='reviewed'?'success':'neutral'}`}>{p.complianceStatus==='reviewed'?'검토완료':p.complianceIssues?.some(x=>x.severity==='danger')?'수정필요':'검토 전'}</span></td><td><span className={`blog26-pill ${statusTone(p.status)}`}>{STATUS_LABEL[p.status]||p.status}</span></td><td>{fmt(p.updatedAt)}</td><td><div className="action-row compact"><button className="btn secondary" onClick={()=>onOpen(p.projectId)}>열기</button><button className="icon-btn danger" title="삭제" onClick={()=>onDelete(p.projectId)}><Trash2 size={14}/></button></div></td></tr>)}</tbody></table></div>:<div className="blog26-list-empty"><FileText size={30}/><b>아직 작성한 글이 없습니다.</b><span>새 블로그 제작을 눌러 첫 콘텐츠를 만들어보세요.</span></div>}</section>
-    <section className="blog26-bottom-grid"><article className="card"><div className="blog26-panel-title"><div><h3>콘텐츠 캘린더</h3><small>발행 예정일 우선 · 미설정 시 생성일</small></div><CalendarDays size={18}/></div><BlogCalendar projects={allProjects} onOpen={onOpen}/></article><article className="card"><div className="blog26-panel-title"><div><h3>문체·자료</h3><small>광고주별 설정</small></div><Wand2 size={18}/></div><p className="blog26-muted">블로그 글을 연 뒤 광고주 문체 프로필, 선호 표현, 금지 표현, CTA, 참고 원문을 서버에 저장할 수 있습니다.</p><div className="blog26-resource-summary"><span>등록 광고주 <b>{advertisers.length}</b></span><span>저장 콘텐츠 <b>{allProjects.length}</b></span><span>의료 심의 관리 <b>{allProjects.filter(p=>isMedicalIndustry(p.industry)).length}</b></span></div></article></section></>}</div>;
+    <section className="blog26-bottom-grid"><article className="card"><div className="blog26-panel-title"><div><h3>콘텐츠 캘린더</h3><small>{selectedAdvertiser?'선택 광고주 · ':''}발행 예정일 우선 · 미설정 시 생성일</small></div><CalendarDays size={18}/></div><BlogCalendar projects={scopedProjects} onOpen={onOpen}/></article><article className="card"><div className="blog26-panel-title"><div><h3>문체·자료</h3><small>광고주별 설정</small></div><Wand2 size={18}/></div><p className="blog26-muted">블로그 글을 연 뒤 광고주 문체 프로필, 선호 표현, 금지 표현, CTA, 참고 원문을 서버에 저장할 수 있습니다.</p><div className="blog26-resource-summary"><span>등록 광고주 <b>{advertisers.length}</b></span><span>현재 범위 콘텐츠 <b>{scopedProjects.length}</b></span><span>의료 심의 관리 <b>{scopedProjects.filter(p=>isMedicalIndustry(p.industry)).length}</b></span></div></article></section></>}</div>;
 }
 
-
 function BlogCalendar({projects,onOpen}:{projects:BlogProject[];onOpen:(id:string)=>void}){
-  const now=new Date(); const year=now.getFullYear(); const month=now.getMonth();
-  const first=new Date(year,month,1).getDay(); const days=new Date(year,month+1,0).getDate();
+  const today=new Date();
+  const [viewDate,setViewDate]=useState(()=>new Date(today.getFullYear(),today.getMonth(),1));
+  const year=viewDate.getFullYear();
+  const month=viewDate.getMonth();
+  const first=new Date(year,month,1).getDay();
+  const days=new Date(year,month+1,0).getDate();
   const byDay=new Map<number,BlogProject[]>();
-  projects.forEach(p=>{const raw=p.scheduledAt||p.createdAt;if(!raw)return;const d=new Date(raw);if(Number.isNaN(d.getTime())||d.getFullYear()!==year||d.getMonth()!==month)return;const day=d.getDate();byDay.set(day,[...(byDay.get(day)||[]),p]);});
+  const monthProjects:BlogProject[]=[];
+  for(const p of projects){
+    const raw=p.scheduledAt||p.createdAt;
+    if(!raw)continue;
+    const d=new Date(raw);
+    if(Number.isNaN(d.getTime())||d.getFullYear()!==year||d.getMonth()!==month)continue;
+    monthProjects.push(p);
+    const day=d.getDate();
+    byDay.set(day,[...(byDay.get(day)||[]),p]);
+  }
+  for(const rows of byDay.values())rows.sort((a,b)=>String(a.scheduledAt||a.createdAt).localeCompare(String(b.scheduledAt||b.createdAt)));
   const cells=[...Array(first).fill(null),...Array.from({length:days},(_,i)=>i+1)];
-  return <div className="blog26-mini-calendar"><div className="blog26-calendar-head"><b>{year}년 {month+1}월</b><span>일 월 화 수 목 금 토</span></div><div className="blog26-calendar-grid">{cells.map((day,i)=>day===null?<div key={`blank-${i}`} className="blank"/>:<div key={day} className="day"><strong>{day}</strong><div>{(byDay.get(day)||[]).slice(0,3).map(p=><button key={p.projectId} onClick={()=>onOpen(p.projectId)} title={p.selectedTitle||p.primaryKeyword||'제목 미정'}>{p.advertiserName} · {p.selectedTitle||p.primaryKeyword||'제목 미정'}</button>)}</div></div>)}</div>{projects.length===0&&<div className="blog26-calendar-empty">표시할 콘텐츠 일정이 없습니다.</div>}</div>;
+  const isCurrentMonth=year===today.getFullYear()&&month===today.getMonth();
+  const move=(delta:number)=>setViewDate(new Date(year,month+delta,1));
+  const goToday=()=>setViewDate(new Date(today.getFullYear(),today.getMonth(),1));
+  return <div className="blog26-mini-calendar">
+    <div className="blog26-calendar-toolbar"><div className="blog26-calendar-nav"><button type="button" onClick={()=>move(-1)} aria-label="이전 달">‹</button><b>{year}년 {month+1}월</b><button type="button" onClick={()=>move(1)} aria-label="다음 달">›</button></div>{!isCurrentMonth&&<button type="button" className="blog26-calendar-today" onClick={goToday}>오늘</button>}</div>
+    <div className="blog26-calendar-weekdays">{['일','월','화','수','목','금','토'].map(day=><span key={day}>{day}</span>)}</div>
+    <div className="blog26-calendar-grid">{cells.map((day,i)=>day===null?<div key={`blank-${i}`} className="blank"/>:<div key={day} className={`day ${isCurrentMonth&&day===today.getDate()?'today':''}`}><strong>{day}</strong><div>{(byDay.get(day)||[]).slice(0,2).map(p=>{const scheduled=Boolean(p.scheduledAt);return <button key={p.projectId} className={scheduled?'scheduled':'created'} onClick={()=>onOpen(p.projectId)} title={`${p.advertiserName} · ${p.selectedTitle||p.primaryKeyword||'제목 미정'} (${scheduled?'발행 예정':'생성일 기준'})`}><span>{p.advertiserName}</span><em>{p.selectedTitle||p.primaryKeyword||'제목 미정'}</em></button>})}{(byDay.get(day)||[]).length>2&&<small className="blog26-calendar-more">+{(byDay.get(day)||[]).length-2}개</small>}</div></div>)}</div>
+    {monthProjects.length===0&&<div className="blog26-calendar-empty">{year}년 {month+1}월에 표시할 콘텐츠 일정이 없습니다.</div>}
+  </div>;
 }
 
 function SeoPanel({seo}:{seo:ReturnType<typeof analyzeBlogSeo>|null}){return <section className="blog26-side-section"><div className="blog26-score"><strong>{seo?.score||0}</strong><span>/100</span></div><p className="blog26-muted">검색 순위 예측이 아닌 HOWTOM 내부 작성 기준 충족도입니다.</p><div className="blog26-check-list">{seo?.checks.map(c=><div key={c.label} className={c.ok?'ok':''}><span>{c.ok?'✓':'○'}</span><b>{c.label}</b></div>)}</div><div className="blog26-mini-stat"><span>본문 길이</span><b>{seo?.length.toLocaleString()||0}자</b></div><div className="blog26-mini-stat"><span>키워드 반복</span><b>{seo?.keywordCount||0}회</b></div></section>}
