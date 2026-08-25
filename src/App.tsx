@@ -6,14 +6,6 @@ import { Layout } from './components/Layout';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { StubPage } from './pages/stub/StubPage';
-import { TemplatesPage } from './pages/production/TemplatesPage';
-import { DocumentWritingPage } from './pages/production/DocumentWritingPage';
-import { VideoScriptPage } from './pages/production/VideoScriptPage';
-import { ProductionLibraryPage } from './pages/production/ProductionLibraryPage';
-import { ContentCalendarPage } from './pages/production/ContentCalendarPage';
-import { AdCreationPage } from './pages/production/AdCreationPage';
-import { BlogProductionPage } from './features/blog/BlogProductionPage';
-import { AssetsPage } from './pages/assets/AssetsPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -25,34 +17,35 @@ function RequireAuth({ children }: { children: ReactNode }) {
   );
 }
 
+function Stub({ title, phase }: { title: string; phase: string }) {
+  return <RequireAuth><StubPage title={title} phase={phase} /></RequireAuth>;
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/" element={<RequireAuth><HomePage /></RequireAuth>} />
 
-      {/* 레퍼런스 - PHASE 3에서 Meta 레퍼런스 MVP로 구현 예정 */}
-      <Route path="/references" element={<RequireAuth><StubPage title="레퍼런스 탐색" phase="PHASE 3" /></RequireAuth>} />
-      <Route path="/references/competitors" element={<RequireAuth><StubPage title="경쟁사 모니터링" phase="PHASE 3" /></RequireAuth>} />
-      <Route path="/references/boards" element={<RequireAuth><StubPage title="레퍼런스 보드" phase="PHASE 3" /></RequireAuth>} />
-      <Route path="/references/settings" element={<RequireAuth><StubPage title="수집 설정" phase="PHASE 3" /></RequireAuth>} />
+      {/* PHASE 1: 메뉴/라우팅 골격만 제공. 실제 기능은 승인 후 단계별 이전/구현합니다. */}
+      <Route path="/references" element={<Stub title="레퍼런스 탐색" phase="PHASE 3" />} />
+      <Route path="/references/competitors" element={<Stub title="경쟁사 모니터링" phase="PHASE 3" />} />
+      <Route path="/references/boards" element={<Stub title="레퍼런스 보드" phase="PHASE 3" />} />
+      <Route path="/references/settings" element={<Stub title="수집 설정" phase="PHASE 3" />} />
 
-      {/* 제작 - PHASE 2에서 Universe의 기존 기능 이전 예정 */}
-      <Route path="/production/ad" element={<RequireAuth><AdCreationPage /></RequireAuth>} />
-      <Route path="/production/blog" element={<RequireAuth><BlogProductionPage /></RequireAuth>} />
-      <Route path="/production/image" element={<RequireAuth><StubPage title="이미지 제작" phase="PHASE 2" /></RequireAuth>} />
-      <Route path="/production/video-script" element={<RequireAuth><VideoScriptPage /></RequireAuth>} />
-      <Route path="/production/document" element={<RequireAuth><DocumentWritingPage /></RequireAuth>} />
+      <Route path="/production/ad" element={<Stub title="광고 제작" phase="PHASE 2" />} />
+      <Route path="/production/blog" element={<Stub title="블로그 제작" phase="PHASE 2" />} />
+      <Route path="/production/image" element={<Stub title="이미지 제작" phase="PHASE 2" />} />
+      <Route path="/production/video-script" element={<Stub title="영상 대본" phase="PHASE 2" />} />
+      <Route path="/production/document" element={<Stub title="문서 작성" phase="PHASE 2" />} />
 
-      {/* 콘텐츠 관리 - PHASE 2에서 이전 예정 */}
-      <Route path="/library" element={<RequireAuth><ProductionLibraryPage /></RequireAuth>} />
-      <Route path="/calendar" element={<RequireAuth><ContentCalendarPage /></RequireAuth>} />
-      <Route path="/templates" element={<RequireAuth><TemplatesPage /></RequireAuth>} />
+      <Route path="/library" element={<Stub title="제작물 보관함" phase="PHASE 2" />} />
+      <Route path="/calendar" element={<Stub title="콘텐츠 캘린더" phase="PHASE 2" />} />
+      <Route path="/templates" element={<Stub title="템플릿" phase="PHASE 2" />} />
 
-      {/* 자산 - PHASE 2 이후 */}
-      <Route path="/assets/images" element={<RequireAuth><AssetsPage type="image" /></RequireAuth>} />
-      <Route path="/assets/videos" element={<RequireAuth><AssetsPage type="video" /></RequireAuth>} />
-      <Route path="/assets/documents" element={<RequireAuth><AssetsPage type="document" /></RequireAuth>} />
+      <Route path="/assets/images" element={<Stub title="이미지 자산" phase="PHASE 2" />} />
+      <Route path="/assets/videos" element={<Stub title="영상 자산" phase="PHASE 2" />} />
+      <Route path="/assets/documents" element={<Stub title="문서 자산" phase="PHASE 2" />} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
