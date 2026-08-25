@@ -2,12 +2,14 @@ import type { ReactNode } from 'react';
 
 export function PageHeader({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
   return (
-    <div className="cs-page-header">
-      <div>
-        <h1>{title}</h1>
-        {description && <p>{description}</p>}
+    <div className="page-header">
+      <div className="page-header-top">
+        <div>
+          <h1>{title}</h1>
+          {description && <p>{description}</p>}
+        </div>
+        {action}
       </div>
-      {action}
     </div>
   );
 }

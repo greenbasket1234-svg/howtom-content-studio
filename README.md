@@ -1,48 +1,74 @@
-# HOWTOM 콘텐츠 제작소 — PHASE 1
+# HOWTOM 콘텐츠 제작소 — PHASE 2A · 블로그 제작
 
-HOWTOM 유니버스에서 콘텐츠 기능을 별도 웹앱으로 안전하게 분리하기 위한 **기반 단계**입니다.
-현재 PHASE 1에서는 콘텐츠/레퍼런스 기능을 실제 구현하지 않습니다.
+HOWTOM 유니버스에서 콘텐츠 기능을 별도 웹앱으로 안전하게 분리하는 프로젝트입니다.
+PHASE 1의 앱 분리 기반 위에 **블로그 제작 기능 하나만** 실제 기능으로 이전했습니다.
 
-## 현재 구현 범위
+## 현재 실제 구현 범위
 
-- 별도 Content Studio React 앱
-- 기존 HOWTOM 관리자 계정과 같은 환경변수를 사용하는 로그인
-- 기존 HOWTOM PostgreSQL의 `advertisers` 목록 읽기
-- Universe와 동일한 `advertiser_id` 사용
+- Content Studio 별도 React 앱
+- HOWTOM 관리자 로그인
+- Universe와 같은 PostgreSQL 공유
+- 같은 `advertiser_id` 사용
+- 광고주 선택 `전체 보기` / 개별 광고주
 - Universe ↔ Content Studio App Switcher
-- Content Studio 홈
-- 향후 메뉴 라우팅 Stub
+- **블로그 프로젝트 목록/생성/수정/삭제**
+- **광고주별 블로그 문체 프로필 저장**
+- **블로그용 사진 자산 메타데이터 저장**
+- SEO 사전 점검
+- 업종별 표현/의료광고 사전 점검
+- 심의 완료 문안 잠금/재검토
+- TXT/HTML 내보내기
 - Desktop / Tablet / Mobile 반응형
 
-## 현재 구현하지 않는 범위
+## 아직 Stub으로 유지하는 기능
 
-PHASE 1에서는 아래 기능을 의도적으로 활성화하지 않습니다.
-
-- 레퍼런스 수집/경쟁사 모니터링/보드
+- 레퍼런스 탐색 / 경쟁사 모니터링 / 보드 / 수집 설정
 - 광고 제작
-- 블로그 제작
 - 이미지 제작
 - 영상 대본
 - 문서 작성
 - 제작물 보관함
 - 콘텐츠 캘린더
 - 템플릿
-- 자산관리
-- AI API
+- 이미지/영상/문서 자산 메뉴
 - 자동 수집 Worker
 
-기존 Universe의 콘텐츠 기능은 PHASE 2 이전이 완료되기 전까지 그대로 유지합니다.
+이 기능들은 한꺼번에 구현하지 않습니다.
 
-## 서비스 역할
+## AI 정책
 
-| 앱 | 역할 |
-|---|---|
-| HOWTOM Universe | 광고 운영, 광고 API, Central Metrics, 인사이트, 보고서 |
-| HOWTOM Content Studio | 콘텐츠/레퍼런스 기능을 단계적으로 이전할 별도 앱 |
-| PostgreSQL | 두 앱이 공유하는 공통 DB |
+PHASE 2A에서는 **새로운 AI API를 연결하지 않습니다.**
 
-Content Studio는 별도 광고주 DB를 만들지 않습니다.
-`/api/advertisers`가 기존 `advertisers` 테이블을 읽으며 Universe와 동일한 ID를 사용합니다.
+- `/api/blog/ai-status` → `configured: false`
+- 블로그 화면의 `초안 만들기` 버튼은 AI가 연결되기 전까지 비활성화
+- 직접 작성/편집/저장/SEO/규정 점검은 정상 사용 가능
+- 향후 여러 제작 메뉴가 준비된 뒤 공통 **AI Gateway**로 연결
+
+즉 블로그 데이터 저장과 업무 흐름을 먼저 완성하고 AI는 후순위로 둡니다.
+
+## 기존 Universe 블로그 데이터
+
+Content Studio는 Universe와 **동일 PostgreSQL의 기존 테이블을 그대로 사용**합니다.
+
+- `blog_projects`
+- `blog_styles`
+- `blog_assets`
+- `advertisers`
+
+따라서 기존 Universe에서 작성한 블로그 데이터가 같은 DB에 있다면 별도 복사 없이 Content Studio에서도 조회합니다.
+
+PHASE 2A 검증이 끝나기 전까지 Universe의 기존 블로그 메뉴/코드는 삭제하지 않습니다.
+
+## 광고주 범위 선택
+
+상단 광고주 선택기는 다음 범위를 제공합니다.
+
+- `전체 보기`: 접근 가능한 모든 광고주
+- 개별 광고주: 해당 `advertiser_id` 하나
+
+블로그 목록도 전체 보기 상태에서는 모든 광고주의 프로젝트를 볼 수 있습니다.
+특정 광고주를 상단에서 선택하면 블로그 화면의 광고주 필터도 해당 광고주로 맞춰집니다.
+새 글을 만들 때는 반드시 실제 광고주 하나를 선택해야 합니다.
 
 ## 실행
 
@@ -53,13 +79,11 @@ npm run build
 npm start
 ```
 
-개발 시:
+개발:
 
 ```bash
 npm run dev
 ```
-
-Vite 개발 서버의 `/api` 요청은 `vite.config.ts` 설정에 따라 Content Studio API 서버로 전달됩니다.
 
 ## 필수 환경변수
 
@@ -67,84 +91,65 @@ Vite 개발 서버의 `/api` 요청은 `vite.config.ts` 설정에 따라 Content
 
 - `DATABASE_URL`: Universe와 같은 PostgreSQL
 - `JWT_SECRET`: Universe와 같은 값
-- `HOWTOM_ADMIN_EMAIL`: Universe와 같은 값
-- `HOWTOM_ADMIN_PASSWORD`: Universe와 같은 값
-- `HOWTOM_ADMIN_NAME`: 표시 이름
+- `HOWTOM_ADMIN_EMAIL`
+- `HOWTOM_ADMIN_PASSWORD`
+- `HOWTOM_ADMIN_NAME`
 - `VITE_UNIVERSE_URL`: Content Studio → Universe 이동 URL
 - `PORT`: Railway가 보통 자동 주입
 
-Universe 쪽에는 다음 빌드 변수가 필요합니다.
+Universe에는 `VITE_CONTENT_STUDIO_URL`을 유지합니다.
 
-- `VITE_CONTENT_STUDIO_URL`: Universe → Content Studio 이동 URL
+## API
 
-## PHASE 1 API
+공통:
 
-### `GET /api/health`
-서비스 상태를 확인합니다.
+- `GET /api/health`
+- `POST /api/login`
+- `GET /api/advertisers`
 
-### `POST /api/login`
-관리자 로그인을 수행합니다.
+블로그:
 
-### `GET /api/advertisers`
-인증 후 공통 PostgreSQL의 광고주 목록을 읽습니다.
+- `GET /api/blog/projects`
+- `POST /api/blog/projects`
+- `GET /api/blog/projects/:id`
+- `PATCH /api/blog/projects/:id`
+- `DELETE /api/blog/projects/:id`
+- `GET /api/blog/styles/:advertiserId`
+- `PUT /api/blog/styles/:advertiserId`
+- `GET /api/blog/assets`
+- `POST /api/blog/assets`
+- `GET /api/blog/ai-status`
+- `POST /api/blog/generate` — 현재 AI 후순위 정책 때문에 비활성
 
-그 외 `/api/*`는 PHASE 1에서 `404`를 반환합니다.
+## 데이터 원칙
 
-## 라우트
+- 콘텐츠 프로젝트의 Source of Truth는 PostgreSQL입니다.
+- localStorage를 블로그 프로젝트 저장소로 사용하지 않습니다.
+- 기존 외부 블로그 연동 UI의 연결 설정은 현재 브라우저 로컬 설정으로 남아 있으며, 핵심 원고/프로젝트 데이터와는 분리되어 있습니다. 이 연동 설정은 외부 발행 기능을 고도화할 때 서버 저장 방식으로 이전합니다.
+- `.env`, `.git`, `node_modules`, `.data`, `dist`는 Git/배포 소스 ZIP에 포함하지 않습니다.
 
-실제 기능은 아직 Stub이지만 향후 위치를 고정하기 위해 라우팅 골격을 유지합니다.
+## Railway
 
-- `/` 홈
-- `/references*` PHASE 3
-- `/production/*` PHASE 2
-- `/library`, `/calendar`, `/templates` PHASE 2
-- `/assets/*` PHASE 2
-
-## 배포
-
-권장 초기 Railway 구조:
-
-1. 기존 Universe 서비스
-2. Content Studio 서비스
-3. 기존 PostgreSQL
-
-Reference Worker는 자동 수집이 실제로 필요해지는 후속 단계에서 추가합니다.
-
-Content Studio 서비스 설정 예:
+Content Studio 서비스:
 
 - Build: `npm run build`
 - Start: `node server.mjs`
 - Healthcheck: `/api/health`
 
-## 유지보수 원칙
+`DATABASE_URL`은 기존 Universe가 사용하는 PostgreSQL과 같은 값을 사용합니다.
 
-- Universe의 광고 API/Central Metrics 코드를 Content Studio에 복제하지 않습니다.
-- Content Studio PHASE 2 기능은 승인 후 하나씩 이전합니다.
-- localStorage를 콘텐츠 데이터 Source of Truth로 사용하지 않습니다.
-- `.env`, `.git`, `node_modules`, `.data`는 배포 ZIP/Git에 포함하지 않습니다.
-- README 설명과 실제 코드는 항상 같은 상태로 유지합니다.
-- PHASE 1 승인 전 PHASE 2/3 기능을 선행 구현하지 않습니다.
+## 이번 단계 완료 조건
+
+- TypeScript 검사 통과
+- 블로그 실제 라우트 `/production/blog` 활성화
+- 다른 PHASE 2 메뉴는 Stub 유지
+- 동일 advertisers / advertiser_id 사용
+- 블로그 CRUD가 PostgreSQL을 사용하도록 구현
+- AI 미연결 상태를 가짜 규칙 기반 생성으로 대체하지 않음
+- Universe 광고 API/Central Metrics 코드는 수정하지 않음
 
 ## 다음 단계
 
-PHASE 1 승인 후 PHASE 2에서 기존 콘텐츠 기능을 **한 번에 전부가 아니라 기능 단위로** 이전합니다.
-권장 순서:
-
-1. 블로그 제작
-2. 광고 제작
-3. 영상 대본
-4. 문서 작성
-5. 제작물 보관함
-6. 콘텐츠 캘린더
-7. 템플릿/자산
-
-레퍼런스 수집은 PHASE 3에서 별도로 구현합니다.
-
-## 광고주 범위 선택
-
-상단 광고주 선택기에 `전체 보기`가 포함됩니다.
-
-- `전체 보기`: 현재 로그인 사용자가 접근 가능한 모든 광고주를 하나의 조회 범위로 사용합니다.
-- 개별 광고주: 선택한 `advertiser_id` 하나만 조회 범위로 사용합니다.
-- 프론트 공통 컨텍스트의 `selectedAdvertiserIds`를 사용하면 이후 레퍼런스/제작물 API에서도 동일한 범위를 재사용할 수 있습니다.
-- 전체 보기 상태는 `__all__` sentinel로만 UI 상태를 표현하며, 실제 DB에 가짜 advertiser 레코드를 만들지 않습니다.
+PHASE 2B는 **광고 제작** 하나만 이전합니다.
+그 다음 영상 대본 → 문서 작성 → 제작물 보관함 → 콘텐츠 캘린더 → 템플릿/자산 순서로 진행합니다.
+레퍼런스 수집은 콘텐츠 제작 기능 이전이 안정화된 뒤 별도 PHASE에서 진행합니다.

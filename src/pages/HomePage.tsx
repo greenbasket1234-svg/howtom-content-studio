@@ -15,7 +15,7 @@ export function HomePage() {
             : '등록된 광고주가 없습니다.'}
       </p>
 
-      {/* 아래 3개 수치는 레퍼런스/제작물 기능이 아직 이 앱으로 이전되지 않은 PHASE 1이라
+      {/* 아래 3개 수치는 레퍼런스/다른 제작물 기능은 아직 이전 전이므로
           실제 데이터가 없습니다. 가짜 숫자를 채우지 않고, PHASE 2 이후 실데이터로 연결됩니다. */}
       <div className="cs-kpi-grid">
         <div className="cs-kpi-card"><span>저장한 레퍼런스</span><b>—</b></div>
@@ -32,9 +32,9 @@ export function HomePage() {
       </div>
 
       <div className="cs-card cs-stub-card">
-        <b>PHASE 1 안내</b>
-        레퍼런스·제작 기능은 아직 이 앱으로 이전되지 않았습니다.<br/>
-        지금은 광고주 공유·화면 이동이 정상 동작하는지 확인하는 단계입니다.
+        <b>PHASE 2A · 블로그 제작 이전 완료</b>
+        블로그 제작은 실제 PostgreSQL 데이터로 사용할 수 있습니다.<br/>
+        다른 제작 기능은 승인 후 하나씩 이전합니다.
       </div>
     </div>
   );

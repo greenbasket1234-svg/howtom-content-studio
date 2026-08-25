@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { apiFetch } from './AuthContext';
 
-export type Advertiser = { id: string; name: string };
+export type Advertiser = { id: string; name: string; industry?: string; website?: string; phone?: string; address?: string };
 export const ALL_ADVERTISERS_ID = '__all__';
 
 type Value = {
