@@ -13,6 +13,7 @@ import { ProductionLibraryPage } from './pages/production/ProductionLibraryPage'
 import { ContentCalendarPage } from './pages/production/ContentCalendarPage';
 import { AdCreationPage } from './pages/production/AdCreationPage';
 import { BlogProductionPage } from './features/blog/BlogProductionPage';
+import { AssetsPage } from './pages/assets/AssetsPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -49,9 +50,9 @@ export default function App() {
       <Route path="/templates" element={<RequireAuth><TemplatesPage /></RequireAuth>} />
 
       {/* 자산 - PHASE 2 이후 */}
-      <Route path="/assets/images" element={<RequireAuth><StubPage title="이미지 자산" phase="PHASE 2" /></RequireAuth>} />
-      <Route path="/assets/videos" element={<RequireAuth><StubPage title="영상 자산" phase="PHASE 2" /></RequireAuth>} />
-      <Route path="/assets/documents" element={<RequireAuth><StubPage title="문서 자산" phase="PHASE 2" /></RequireAuth>} />
+      <Route path="/assets/images" element={<RequireAuth><AssetsPage type="image" /></RequireAuth>} />
+      <Route path="/assets/videos" element={<RequireAuth><AssetsPage type="video" /></RequireAuth>} />
+      <Route path="/assets/documents" element={<RequireAuth><AssetsPage type="document" /></RequireAuth>} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
