@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Check, Plus, Save, Search } from 'lucide-react';
+import { Check, Plus, Save, Search, Trash2 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
-import { createProject, loadProjects, loadTemplates, patchProject, useTemplate, type ContentProject, type CopyVariant } from '../../store/contentStore';
+import { createProject, deleteProject, loadProjects, loadTemplates, patchProject, useTemplate, type ContentProject, type CopyVariant } from '../../store/contentStore';
 
 const AD_CHANNELS = ['메타', '네이버 GFA', '네이버 검색', '구글 검색', '유튜브', '당근', '카카오', '틱톡'];
 const OBJECTIVES = ['DB 수집', '구매', '트래픽', '상담 신청', '브랜드 인지도', '앱 전환'];
@@ -60,6 +60,13 @@ export function AdCreationPage() {
     setNotice(`템플릿 '${t.name}'을 적용했습니다.`);
   };
   const complete = () => { if (!draft) return; patch('status', 'completed'); setNotice('제작 완료 처리했습니다.'); refresh(); };
+  const remove = (id: string) => {
+    if (!confirm('이 광고 제작 프로젝트를 삭제할까요? 되돌릴 수 없습니다.')) return;
+    deleteProject(id);
+    if (draft?.projectId === id) setParams({});
+    refresh();
+    setNotice('삭제했습니다.');
+  };
 
   if (!draft) {
     const visible = rows.filter(p => (!q || [p.title, p.advertiserName, p.channel].join(' ').toLowerCase().includes(q.toLowerCase())) && (!selectedId || p.advertiserId === selectedId));
@@ -74,7 +81,10 @@ export function AdCreationPage() {
               <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className={`content-status ${p.status === 'completed' ? 'good' : 'neutral'}`}>{p.status === 'completed' ? '제작 완료' : '초안'}</span><small style={{ color: 'var(--text-muted)' }}>{fmt(p.updatedAt)}</small></div>
               <h3 style={{ margin: '6px 0 0', fontSize: 14.5 }}>{p.title}</h3>
               <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12.5 }}>{p.advertiserName} · {p.channel} · {p.creativeType}</p>
-              <button className="cs-btn" style={{ marginTop: 'auto' }} onClick={() => setParams({ project: p.projectId })}>열기</button>
+              <div style={{ display: 'flex', gap: 6, marginTop: 'auto' }}>
+                <button className="cs-btn" style={{ flex: 1 }} onClick={() => setParams({ project: p.projectId })}>열기</button>
+                <button className="cs-btn" style={{ color: '#dc2626', borderColor: '#fecaca' }} onClick={() => remove(p.projectId)}><Trash2 size={13} /></button>
+              </div>
             </article>
           ))}
           {!visible.length && <div className="content-empty">아직 저장된 광고 제작 프로젝트가 없습니다.</div>}
@@ -85,7 +95,7 @@ export function AdCreationPage() {
 
   return (
     <div className="content-system-page">
-      <PageHeader title="광고 제작" description="브리프·레퍼런스·후킹·카피·CTA·이미지/영상 기획을 한 화면에서 제작합니다." action={<div className="content-header-actions"><button className="cs-btn" onClick={() => setParams({})}>목록</button><button className="cs-btn cs-btn-primary" onClick={complete}><Check size={15} /> 제작 완료</button></div>} />
+      <PageHeader title="광고 제작" description="브리프·레퍼런스·후킹·카피·CTA·이미지/영상 기획을 한 화면에서 제작합니다." action={<div className="content-header-actions"><button className="cs-btn" onClick={() => setParams({})}>목록</button><button className="cs-btn" style={{ color: '#dc2626', borderColor: '#fecaca' }} onClick={() => remove(draft.projectId)}><Trash2 size={15} /> 삭제</button><button className="cs-btn cs-btn-primary" onClick={complete}><Check size={15} /> 제작 완료</button></div>} />
       {notice && <div className="content-notice">{notice}</div>}
 
       <section className="cs-card content-section">

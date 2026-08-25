@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Check, Plus, Search, Trash2 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
-import { createProject, loadProjects, patchProject, type ContentProject, type DocumentBlock } from '../../store/contentStore';
+import { createProject, deleteProject, loadProjects, patchProject, type ContentProject, type DocumentBlock } from '../../store/contentStore';
 
 const uid = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const fmt = (v?: string) => { if (!v) return '-'; const d = new Date(v); return Number.isNaN(d.getTime()) ? '-' : `${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}.`; };
@@ -50,6 +50,13 @@ export function DocumentWritingPage() {
     setNotice('문서를 완료 처리했습니다.');
     refresh();
   };
+  const remove = (id: string) => {
+    if (!confirm('이 문서를 삭제할까요? 되돌릴 수 없습니다.')) return;
+    deleteProject(id);
+    if (draft?.projectId === id) { setParams({}); }
+    refresh();
+    setNotice('문서를 삭제했습니다.');
+  };
 
   if (!draft) {
     const visible = rows.filter(p => (!q || [p.title, p.advertiserName, p.documentData?.documentType].join(' ').toLowerCase().includes(q.toLowerCase())) && (!selectedId || p.advertiserId === selectedId));
@@ -64,7 +71,10 @@ export function DocumentWritingPage() {
               <div style={{ display: 'flex', justifyContent: 'space-between' }}><span className="badge" style={{ background: 'var(--accent-bg)', color: 'var(--accent)', borderRadius: 999, padding: '3px 9px', fontSize: 11.5, fontWeight: 700 }}>{p.documentData?.documentType || '문서'}</span><small style={{ color: 'var(--text-muted)' }}>{fmt(p.updatedAt)}</small></div>
               <h3 style={{ margin: '6px 0 0', fontSize: 14.5 }}>{p.title}</h3>
               <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12.5 }}>{p.advertiserName} · 블록 {p.documentData?.blocks?.length || 0}개</p>
-              <button className="cs-btn" style={{ marginTop: 'auto' }} onClick={() => setParams({ project: p.projectId })}>문서 열기</button>
+              <div style={{ display: 'flex', gap: 6, marginTop: 'auto' }}>
+                <button className="cs-btn" style={{ flex: 1 }} onClick={() => setParams({ project: p.projectId })}>문서 열기</button>
+                <button className="cs-btn" style={{ color: '#dc2626', borderColor: '#fecaca' }} onClick={() => remove(p.projectId)}><Trash2 size={13} /></button>
+              </div>
             </article>
           ))}
           {!visible.length && <div className="content-empty">아직 작성한 문서가 없습니다.</div>}
@@ -75,7 +85,7 @@ export function DocumentWritingPage() {
 
   return (
     <div className="content-system-page">
-      <PageHeader title="문서 작성" description="업무 문서·기획서·제안 초안을 작성합니다." action={<div className="content-header-actions"><button className="cs-btn" onClick={() => setParams({})}>목록</button><button className="cs-btn cs-btn-primary" onClick={complete}><Check size={15} /> 완료 처리</button></div>} />
+      <PageHeader title="문서 작성" description="업무 문서·기획서·제안 초안을 작성합니다." action={<div className="content-header-actions"><button className="cs-btn" onClick={() => setParams({})}>목록</button><button className="cs-btn" style={{ color: '#dc2626', borderColor: '#fecaca' }} onClick={() => remove(draft.projectId)}><Trash2 size={15} /> 삭제</button><button className="cs-btn cs-btn-primary" onClick={complete}><Check size={15} /> 완료 처리</button></div>} />
       {notice && <div className="content-notice">{notice}</div>}
       <section className="cs-card content-section">
         <div className="content-form-grid">
