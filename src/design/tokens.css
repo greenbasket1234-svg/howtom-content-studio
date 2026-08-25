@@ -1,0 +1,90 @@
+/*
+  HOWTOM 콘텐츠 제작소 디자인 토큰
+  ------------------------------------------------------------
+  Universe(src/index.css)의 핵심 색상·타이포만 그대로 가져왔습니다.
+  Universe의 420KB짜리 전체 스타일시트를 복사하지 않고, 이 앱에 필요한
+  만큼만 최소로 유지합니다. 색상 값을 바꿀 땐 이 파일 하나만 고치면 됩니다.
+*/
+:root{
+  --sidebar-bg:#091222;
+  --sidebar-bg-deep:#060d19;
+  --sidebar-text:#b4bfd2;
+  --sidebar-text-active:#ffffff;
+  --sidebar-text-muted:#6f7d95;
+  --sidebar-border:rgba(148,163,184,.14);
+  --accent:#2f65d9;
+  --accent-hover:#2857bf;
+  --accent-bg:#edf3ff;
+  --page-bg:#f4f6fa;
+  --text-primary:#172033;
+  --text-secondary:#556176;
+  --text-muted:#7e899b;
+  --border:#e5e9f1;
+  --card-bg:#ffffff;
+  --radius:14px;
+}
+
+*{box-sizing:border-box}
+html,body,#root{height:100%}
+body{margin:0;font-family:'Pretendard','Apple SD Gothic Neo',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--page-bg);color:var(--text-primary);font-size:15px;line-height:1.55}
+button,input,select,textarea{font-family:inherit;font-size:14px}
+a{color:inherit;text-decoration:none}
+
+.cs-shell{display:flex;min-height:100vh}
+.cs-sidebar{width:220px;flex-shrink:0;background:var(--sidebar-bg);color:var(--sidebar-text);display:flex;flex-direction:column;padding:18px 12px}
+.cs-sidebar-logo{color:#fff;font-weight:800;font-size:16px;padding:6px 8px 18px}
+.cs-nav{display:flex;flex-direction:column;gap:2px}
+.cs-nav a{padding:10px 12px;border-radius:10px;color:var(--sidebar-text);font-weight:650;font-size:14px;display:flex;align-items:center;gap:8px}
+.cs-nav a:hover{background:rgba(255,255,255,.06);color:#fff}
+.cs-nav a.active{background:var(--accent);color:#fff}
+.cs-nav-group-label{color:var(--sidebar-text-muted);font-size:11.5px;font-weight:750;padding:14px 12px 4px;text-transform:uppercase;letter-spacing:.02em}
+.cs-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.cs-topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--border);background:#fff}
+.cs-content{flex:1;padding:24px;max-width:1100px;width:100%;margin:0 auto}
+
+.cs-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.cs-btn{border:1px solid var(--border);background:#fff;border-radius:10px;padding:10px 16px;font-weight:700;cursor:pointer;color:var(--text-primary)}
+.cs-btn:hover{border-color:var(--accent);color:var(--accent)}
+.cs-btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.cs-btn-primary:hover{background:var(--accent-hover);color:#fff}
+
+.cs-select{border:1px solid var(--border);border-radius:10px;padding:8px 12px;background:#fff;color:var(--text-primary);font-weight:650;min-width:160px}
+
+.cs-app-switcher{position:relative}
+.cs-app-switcher-menu{position:absolute;top:calc(100% + 6px);left:0;background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.14);padding:6px;min-width:200px;z-index:50}
+.cs-app-switcher-item{display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;width:100%;text-align:left;border:0;background:transparent;cursor:pointer;font-weight:650;font-size:13.5px;color:var(--text-secondary)}
+.cs-app-switcher-item:hover{background:var(--accent-bg)}
+.cs-app-switcher-item.active{color:var(--accent)}
+
+.cs-kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:22px}
+.cs-kpi-card{background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:18px}
+.cs-kpi-card span{display:block;color:var(--text-muted);font-size:13px;margin-bottom:6px}
+.cs-kpi-card b{font-size:24px}
+
+.cs-quick-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:24px}
+.cs-quick-btn{display:flex;flex-direction:column;gap:8px;align-items:flex-start;padding:16px;border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;font-weight:700;color:var(--text-primary)}
+.cs-quick-btn:hover{border-color:var(--accent);box-shadow:0 6px 16px rgba(47,101,217,.12)}
+
+.cs-stub-card{padding:40px;text-align:center;color:var(--text-muted)}
+.cs-stub-card b{display:block;color:var(--text-primary);font-size:16px;margin-bottom:8px}
+
+.cs-login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--sidebar-bg)}
+.cs-login-card{background:#fff;border-radius:16px;padding:36px;width:100%;max-width:360px}
+.cs-login-card h1{font-size:18px;margin:0 0 4px}
+.cs-login-card p{color:var(--text-muted);font-size:13.5px;margin:0 0 20px}
+.cs-login-card label{display:block;margin-bottom:12px;font-size:13.5px;font-weight:650;color:var(--text-secondary)}
+.cs-login-card input{width:100%;margin-top:5px;padding:10px 12px;border:1px solid var(--border);border-radius:10px}
+.cs-error{color:#dc2626;font-size:13px;margin:8px 0}
+
+@media(max-width:900px){
+  .cs-shell{flex-direction:column}
+  .cs-sidebar{width:100%;flex-direction:row;overflow-x:auto;padding:10px}
+  .cs-nav{flex-direction:row}
+  .cs-nav-group-label{display:none}
+  .cs-kpi-grid{grid-template-columns:1fr}
+  .cs-quick-grid{grid-template-columns:1fr 1fr}
+}
+@media(max-width:560px){
+  .cs-quick-grid{grid-template-columns:1fr}
+  .cs-content{padding:14px}
+}
