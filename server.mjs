@@ -79,6 +79,68 @@ async function getCurrentTenantId() {
   return cachedTenantId;
 }
 
+// --- 블로그 AI 원고 생성 -----------------------------------------------------------
+// Universe의 server.mjs와 완전히 같은 방식(같은 환경변수, 같은 AI 호출 로직)을 씁니다.
+// 두 서버가 서로 호출하지 않고, 각자 독립적으로 같은 외부 AI API에 요청합니다.
+const BLOG_AI_PROVIDER = (process.env.BLOG_AI_PROVIDER || '').trim().toLowerCase();
+const BLOG_AI_API_KEY = process.env.BLOG_AI_API_KEY || '';
+const BLOG_AI_API_URL = process.env.BLOG_AI_API_URL || '';
+const BLOG_AI_MODEL = process.env.BLOG_AI_MODEL || '';
+function blogAiConfigured() {
+  if (BLOG_AI_PROVIDER === 'anthropic' || BLOG_AI_PROVIDER === 'openai') return Boolean(BLOG_AI_API_KEY);
+  if (BLOG_AI_PROVIDER === 'custom') return Boolean(BLOG_AI_API_URL);
+  return false;
+}
+function blogAiStatus() { return { configured: blogAiConfigured(), provider: BLOG_AI_PROVIDER || null }; }
+function makeId(prefix) { return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
+function cleanText(value, max = 2000) { return String(value ?? '').trim().slice(0, max); }
+
+function parseAiJson(text) {
+  const cleaned = String(text ?? '').replace(/```json/gi, '').replace(/```/g, '').trim();
+  let parsed;
+  try { parsed = JSON.parse(cleaned); } catch { throw new Error('AI 응답을 JSON으로 해석할 수 없습니다.'); }
+  if (!Array.isArray(parsed.titles) || !Array.isArray(parsed.blocks)) throw new Error('AI 응답 형식이 올바르지 않습니다. (titles, blocks 필요)');
+  return {
+    titles: parsed.titles.slice(0, 5).map(t => cleanText(String(t), 200)),
+    blocks: parsed.blocks.slice(0, 10).map(b => ({ blockId: makeId('block'), type: cleanText(String(b?.type || 'paragraph'), 20), title: cleanText(String(b?.title || ''), 200), text: cleanText(String(b?.text || ''), 4000) })),
+  };
+}
+function buildBlogAiPrompts(brief) {
+  const system = `당신은 ${brief.industry || '업종 무관'} 업종 광고주를 위한 ${brief.platform || '블로그'} 원고를 쓰는 전문 카피라이터입니다.\n과장·단정 표현, 치료효과 단정, 비교·비방 표현은 피하고 확인 가능한 사실 중심으로 작성합니다.\n반드시 아래 JSON 형식으로만 응답하세요. 그 외 설명 문장이나 코드블록 표시(\`\`\`)는 절대 포함하지 마세요.\n{"titles": ["제목1", "제목2", "제목3"], "blocks": [{"type": "paragraph|h2|faq|cta", "title": "블록 제목", "text": "본문"}]}\nblocks는 도입 1개, 핵심정보 h2 1개 이상, 확인사항 h2 1개, FAQ 1개, CTA 1개를 포함해 5~7개로 구성하세요.`;
+  const user = `광고주명: ${brief.advertiser}\n업종: ${brief.industry || '미지정'}\n플랫폼: ${brief.platform || '미지정'}\n콘텐츠 유형: ${brief.contentType || '정보형'}\n메인 키워드: ${brief.keyword}\n서브 키워드: ${(brief.secondaryKeywords || []).join(', ') || '없음'}\n지역: ${brief.region || '없음'}\n목표 글자 수: 약 ${brief.targetLength || 2000}자\n톤앤매너: ${brief.tone || '자연스러운 정보 전달형'}`;
+  return { system, user };
+}
+async function callExternalBlogAi(brief) {
+  const { system, user } = buildBlogAiPrompts(brief);
+  if (BLOG_AI_PROVIDER === 'anthropic') {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'x-api-key': BLOG_AI_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: BLOG_AI_MODEL || 'claude-sonnet-4-6', max_tokens: 2200, system, messages: [{ role: 'user', content: user }] }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || `Anthropic API HTTP ${res.status}`);
+    const text = Array.isArray(data.content) ? data.content.map(b => b.text || '').join('') : '';
+    return parseAiJson(text);
+  }
+  if (BLOG_AI_PROVIDER === 'openai') {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST', headers: { Authorization: `Bearer ${BLOG_AI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: BLOG_AI_MODEL || 'gpt-4o-mini', messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.7 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || `OpenAI API HTTP ${res.status}`);
+    return parseAiJson(data?.choices?.[0]?.message?.content || '');
+  }
+  if (BLOG_AI_PROVIDER === 'custom') {
+    const res = await fetch(BLOG_AI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ systemPrompt: system, userPrompt: user, brief }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || `외부 AI API HTTP ${res.status}`);
+    if (Array.isArray(data.titles) && Array.isArray(data.blocks)) return { titles: data.titles.slice(0, 5).map(t => cleanText(String(t), 200)), blocks: data.blocks.slice(0, 10).map(b => ({ blockId: makeId('block'), type: cleanText(String(b?.type || 'paragraph'), 20), title: cleanText(String(b?.title || ''), 200), text: cleanText(String(b?.text || ''), 4000) })) };
+    return parseAiJson(JSON.stringify(data));
+  }
+  throw new Error('BLOG_AI_PROVIDER가 설정되지 않았습니다.');
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
@@ -150,6 +212,65 @@ const server = http.createServer(async (req, res) => {
         if (!tenantId) return sendJson(res, 200, []);
         const result = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id = $1 ORDER BY name`, [tenantId]);
         return sendJson(res, 200, result.rows);
+      }
+
+      // 블로그: Universe가 이미 만들어둔 blog_projects 테이블(같은 DB)을 그대로 씁니다.
+      if (req.method === 'GET' && pathname === '/api/blog/projects') {
+        if (!pgPool) return sendJson(res, 200, []);
+        const tenantId = await getCurrentTenantId();
+        const r = await pgPool.query(`SELECT id, data FROM blog_projects WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]);
+        return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
+      }
+      if (req.method === 'POST' && pathname === '/api/blog/projects') {
+        if (!pgPool) return sendJson(res, 400, { error: 'DATABASE_URL이 설정되지 않았습니다.' });
+        const body = await readJson(req); const stamp = new Date().toISOString();
+        const row = {
+          projectId: makeId('blog'), advertiserId: cleanText(body.advertiserId, 120), advertiserName: cleanText(body.advertiserName, 120),
+          industry: cleanText(body.industry || '일반 서비스업', 120), platform: cleanText(body.platform || '네이버 블로그', 120), contentType: cleanText(body.contentType || '정보형 블로그', 120),
+          purpose: cleanText(body.purpose || '정보 제공', 120), primaryKeyword: cleanText(body.primaryKeyword || '', 200),
+          secondaryKeywords: Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords.map(x => cleanText(x, 100)).filter(Boolean).slice(0, 20) : [],
+          region: cleanText(body.region || '', 120), targetLength: Number(body.targetLength || 2000), tone: cleanText(body.tone || '광고주 문체 자동 적용', 120), referenceText: cleanText(body.referenceText || '', 20000),
+          titleOptions: [], selectedTitle: '', blocks: [], status: 'draft', complianceStatus: 'not-reviewed',
+          seoScore: 0, complianceIssues: [], publishStatus: 'draft', publishedUrl: '', createdAt: stamp, updatedAt: stamp,
+        };
+        if (!row.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+        const tenantId = await getCurrentTenantId();
+        const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]).catch(() => ({ rows: [] }));
+        await pgPool.query(`INSERT INTO blog_projects (id, tenant_id, advertiser_id, data) VALUES ($1,$2,$3,$4)`, [row.projectId, tenantId, advRes.rows[0]?.id || null, JSON.stringify(row)]);
+        return sendJson(res, 201, row);
+      }
+      const blogProjectMatch = pathname.match(/^\/api\/blog\/projects\/([^/]+)$/);
+      if (blogProjectMatch && req.method === 'GET') {
+        const tenantId = await getCurrentTenantId();
+        const r = await pgPool.query(`SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(blogProjectMatch[1])]);
+        return r.rows[0] ? sendJson(res, 200, r.rows[0].data) : sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+      }
+      if (blogProjectMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+        const id = decodeURIComponent(blogProjectMatch[1]); const patch = await readJson(req);
+        const tenantId = await getCurrentTenantId();
+        const cur = await pgPool.query(`SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+        if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+        const safePatch = { ...patch }; delete safePatch.projectId; delete safePatch.createdAt;
+        const updated = { ...cur.rows[0].data, ...safePatch, updatedAt: new Date().toISOString() };
+        await pgPool.query(`UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
+        return sendJson(res, 200, updated);
+      }
+      if (blogProjectMatch && req.method === 'DELETE') {
+        const tenantId = await getCurrentTenantId();
+        await pgPool.query(`DELETE FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(blogProjectMatch[1])]);
+        return sendJson(res, 200, { ok: true });
+      }
+      if (req.method === 'GET' && pathname === '/api/blog/ai-status') return sendJson(res, 200, blogAiStatus());
+      if (req.method === 'POST' && pathname === '/api/blog/generate') {
+        const body = await readJson(req); const keyword = cleanText(body.primaryKeyword, 200); const advertiser = cleanText(body.advertiserName || '광고주', 120);
+        if (!keyword) return sendJson(res, 400, { error: '메인 키워드를 입력하세요.' });
+        if (!blogAiConfigured()) return sendJson(res, 400, { error: '블로그 AI가 연결되지 않았습니다. 관리자가 외부 AI API를 연결해주세요.' });
+        try {
+          const ai = await callExternalBlogAi({ advertiser, industry: body.industry, platform: body.platform, contentType: body.contentType, keyword, secondaryKeywords: body.secondaryKeywords, region: body.region, targetLength: body.targetLength, tone: body.tone });
+          return sendJson(res, 200, { generator: `external-ai:${BLOG_AI_PROVIDER}`, titles: ai.titles, blocks: ai.blocks });
+        } catch (error) {
+          return sendJson(res, 502, { error: error instanceof Error ? `외부 AI 원고 생성에 실패했습니다: ${error.message}` : '외부 AI 원고 생성에 실패했습니다.' });
+        }
       }
 
       return sendJson(res, 404, { error: 'Not found' });

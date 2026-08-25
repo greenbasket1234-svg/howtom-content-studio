@@ -45,7 +45,7 @@ export function Layout({ children }: { children: ReactNode }) {
             <div key={i}>
               {group.label && <div className="cs-nav-group-label">{group.label}</div>}
               {group.items.map(item => (
-                <NavLink key={item.to} to={item.to} end={item.to === '/'} className={({ isActive }) => isActive ? 'active' : ''}>{item.label}</NavLink>
+                <NavLink key={item.to} to={item.to} end className={({ isActive }) => isActive ? 'active' : ''}>{item.label}</NavLink>
               ))}
             </div>
           ))}
