@@ -7,6 +7,7 @@ import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { StubPage } from './pages/stub/StubPage';
 import { TemplatesPage } from './pages/production/TemplatesPage';
+import { DocumentWritingPage } from './pages/production/DocumentWritingPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -35,7 +36,7 @@ export default function App() {
       <Route path="/production/blog" element={<RequireAuth><StubPage title="블로그 제작" phase="PHASE 2" /></RequireAuth>} />
       <Route path="/production/image" element={<RequireAuth><StubPage title="이미지 제작" phase="PHASE 2" /></RequireAuth>} />
       <Route path="/production/video-script" element={<RequireAuth><StubPage title="영상 대본" phase="PHASE 2" /></RequireAuth>} />
-      <Route path="/production/document" element={<RequireAuth><StubPage title="문서 작성" phase="PHASE 2" /></RequireAuth>} />
+      <Route path="/production/document" element={<RequireAuth><DocumentWritingPage /></RequireAuth>} />
 
       {/* 콘텐츠 관리 - PHASE 2에서 이전 예정 */}
       <Route path="/library" element={<RequireAuth><StubPage title="제작물 보관함" phase="PHASE 2" /></RequireAuth>} />
