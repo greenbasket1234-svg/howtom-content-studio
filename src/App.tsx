@@ -6,6 +6,7 @@ import { Layout } from './components/Layout';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { StubPage } from './pages/stub/StubPage';
+import { TemplatesPage } from './pages/production/TemplatesPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -39,7 +40,7 @@ export default function App() {
       {/* 콘텐츠 관리 - PHASE 2에서 이전 예정 */}
       <Route path="/library" element={<RequireAuth><StubPage title="제작물 보관함" phase="PHASE 2" /></RequireAuth>} />
       <Route path="/calendar" element={<RequireAuth><StubPage title="콘텐츠 캘린더" phase="PHASE 2" /></RequireAuth>} />
-      <Route path="/templates" element={<RequireAuth><StubPage title="템플릿" phase="PHASE 2" /></RequireAuth>} />
+      <Route path="/templates" element={<RequireAuth><TemplatesPage /></RequireAuth>} />
 
       {/* 자산 - PHASE 2 이후 */}
       <Route path="/assets/images" element={<RequireAuth><StubPage title="이미지 자산" phase="PHASE 2" /></RequireAuth>} />
