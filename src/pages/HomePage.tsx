@@ -32,9 +32,9 @@ export function HomePage() {
       </div>
 
       <div className="cs-card cs-stub-card">
-        <b>PHASE 2A · 블로그 제작 이전 완료</b>
-        블로그 제작은 실제 PostgreSQL 데이터로 사용할 수 있습니다.<br/>
-        다른 제작 기능은 승인 후 하나씩 이전합니다.
+        <b>PHASE 2B · 블로그 + 광고 제작 이전 완료</b>
+        블로그 제작과 광고 제작은 실제 PostgreSQL 데이터로 사용할 수 있습니다.<br/>
+        영상 대본·문서·보관함·템플릿 등은 승인 후 하나씩 이전합니다.
       </div>
     </div>
   );

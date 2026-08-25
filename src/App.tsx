@@ -7,6 +7,7 @@ import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { StubPage } from './pages/stub/StubPage';
 import { BlogProductionPage } from './features/blog/BlogProductionPage';
+import { AdCreationPage } from './features/ad/AdCreationPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -28,13 +29,13 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/" element={<RequireAuth><HomePage /></RequireAuth>} />
 
-      {/* PHASE 2A: 블로그 제작만 실제 기능으로 이전. 나머지는 승인 전까지 Stub 유지. */}
+      {/* PHASE 2B: 블로그 + 광고 제작만 실제 기능으로 이전. 나머지는 승인 전까지 Stub 유지. */}
       <Route path="/references" element={<Stub title="레퍼런스 탐색" phase="PHASE 3" />} />
       <Route path="/references/competitors" element={<Stub title="경쟁사 모니터링" phase="PHASE 3" />} />
       <Route path="/references/boards" element={<Stub title="레퍼런스 보드" phase="PHASE 3" />} />
       <Route path="/references/settings" element={<Stub title="수집 설정" phase="PHASE 3" />} />
 
-      <Route path="/production/ad" element={<Stub title="광고 제작" phase="PHASE 2" />} />
+      <Route path="/production/ad" element={<RequireAuth><AdCreationPage /></RequireAuth>} />
       <Route path="/production/blog" element={<RequireAuth><BlogProductionPage /></RequireAuth>} />
       <Route path="/production/image" element={<Stub title="이미지 제작" phase="PHASE 2" />} />
       <Route path="/production/video-script" element={<Stub title="영상 대본" phase="PHASE 2" />} />

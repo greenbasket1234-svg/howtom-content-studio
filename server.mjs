@@ -1,14 +1,15 @@
 // ============================================================
-// HOWTOM 콘텐츠 제작소 — PHASE 2A 서버
+// HOWTOM 콘텐츠 제작소 — PHASE 2B 서버
 // ------------------------------------------------------------
 // 현재 실제 기능:
 //   1) 관리자 로그인
 //   2) 공통 PostgreSQL 광고주 조회
 //   3) 블로그 제작 프로젝트/문체/사진자산 CRUD
-//   4) dist/ 정적 파일 + SPA 라우팅
+//   4) 광고 제작 프로젝트 CRUD
+//   5) dist/ 정적 파일 + SPA 라우팅
 //
 // AI 원고 생성은 아직 연결하지 않습니다. 정확한 수치/콘텐츠 데이터는
-// PostgreSQL을 Source of Truth로 사용하고, 후속 단계에서 공통 AI Gateway를 붙입니다.
+// PostgreSQL을 Source of Truth로 사용하고, 블로그 AI 원고는 제휴 업체 API 확정 후 연결합니다.
 // ============================================================
 import http from 'node:http';
 import fs from 'node:fs';
@@ -70,6 +71,64 @@ function makeId(prefix) {
   return `${prefix}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
+const AD_STATUSES = new Set(['draft','in-progress','review','completed','archived']);
+function normalizeAdProject(body = {}, current = null) {
+  const stamp = new Date().toISOString();
+  const base = current || {};
+  const stringList = (value, fallback = []) => Array.isArray(value) ? value.map(x => cleanText(x, 500)).slice(0, 20) : fallback;
+  const variantsSource = Array.isArray(body.copyVariants) ? body.copyVariants : (Array.isArray(base.copyVariants) ? base.copyVariants : []);
+  const copyVariants = variantsSource.slice(0, 3).map((v, index) => ({
+    variantId: cleanText(v?.variantId || `variant-${index + 1}`, 120),
+    label: cleanText(v?.label || `${String.fromCharCode(65 + index)}안`, 40),
+    headline: cleanText(v?.headline || '', 500),
+    description: cleanText(v?.description || '', 1000),
+    body: cleanText(v?.body || '', 12000),
+    cta: cleanText(v?.cta || '더 알아보기', 120),
+  }));
+  while (copyVariants.length < 3) {
+    const index = copyVariants.length;
+    copyVariants.push({ variantId:`variant-${index+1}`, label:`${String.fromCharCode(65+index)}안`, headline:'', description:'', body:'', cta:'더 알아보기' });
+  }
+  const imageSource = body.imagePlan && typeof body.imagePlan === 'object' ? body.imagePlan : (base.imagePlan || {});
+  const videoSource = body.videoPlan && typeof body.videoPlan === 'object' ? body.videoPlan : (base.videoPlan || {});
+  const statusCandidate = cleanText(body.status ?? base.status ?? 'draft', 40);
+  return {
+    ...base,
+    projectId: base.projectId || cleanText(body.projectId || '', 120),
+    title: cleanText(body.title ?? base.title ?? '새 광고 제작', 240),
+    advertiserId: cleanText(body.advertiserId ?? base.advertiserId ?? '', 120),
+    advertiserName: cleanText(body.advertiserName ?? base.advertiserName ?? '', 160),
+    channel: cleanText(body.channel ?? base.channel ?? '메타', 120),
+    objective: cleanText(body.objective ?? base.objective ?? 'DB 수집', 120),
+    creativeType: cleanText(body.creativeType ?? base.creativeType ?? '정사각형 이미지', 120),
+    representativeKpi: cleanText(body.representativeKpi ?? base.representativeKpi ?? 'DB당 비용', 120),
+    target: cleanText(body.target ?? base.target ?? '', 3000),
+    keyBenefit: cleanText(body.keyBenefit ?? base.keyBenefit ?? '', 3000),
+    price: cleanText(body.price ?? base.price ?? '', 1000),
+    mandatoryText: cleanText(body.mandatoryText ?? base.mandatoryText ?? '', 6000),
+    prohibitedText: cleanText(body.prohibitedText ?? base.prohibitedText ?? '', 6000),
+    landingUrl: cleanText(body.landingUrl ?? base.landingUrl ?? '', 2000),
+    format: cleanText(body.format ?? base.format ?? '1:1', 80),
+    hookType: cleanText(body.hookType ?? base.hookType ?? '', 120),
+    hooks: (() => { const values = stringList(body.hooks, Array.isArray(base.hooks) ? base.hooks : ['', '', '']).slice(0, 3); while (values.length < 3) values.push(''); return values; })(),
+    copyVariants,
+    imagePlan: {
+      visualType: cleanText(imageSource.visualType || '', 500), subject: cleanText(imageSource.subject || '', 3000),
+      background: cleanText(imageSource.background || '', 3000), mainText: cleanText(imageSource.mainText || '', 1500),
+      subText: cleanText(imageSource.subText || '', 1500), ratio: cleanText(imageSource.ratio || '1:1', 80), textRatio: cleanText(imageSource.textRatio || '', 120),
+    },
+    videoPlan: {
+      length: cleanText(videoSource.length || '', 120), style: cleanText(videoSource.style || '', 500),
+      hook3s: cleanText(videoSource.hook3s || '', 3000), scenes: cleanText(videoSource.scenes || '', 12000), endingCta: cleanText(videoSource.endingCta || '', 1500),
+    },
+    referenceIds: stringList(body.referenceIds, Array.isArray(base.referenceIds) ? base.referenceIds : []).slice(0, 100),
+    resultAssetIds: stringList(body.resultAssetIds, Array.isArray(base.resultAssetIds) ? base.resultAssetIds : []).slice(0, 100),
+    status: AD_STATUSES.has(statusCandidate) ? statusCandidate : 'draft',
+    createdAt: base.createdAt || cleanText(body.createdAt || stamp, 80),
+    updatedAt: stamp,
+  };
+}
+
 let pgPool = null;
 if (DATABASE_URL) {
   try {
@@ -93,6 +152,22 @@ async function getCurrentTenantId() {
   const result = await pgPool.query(`SELECT id FROM tenants WHERE slug = 'howtom' LIMIT 1`);
   cachedTenantId = result.rows[0]?.id || null;
   return cachedTenantId;
+}
+
+async function ensureAdTables() {
+  if (!pgPool) return;
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS ad_projects (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID REFERENCES advertisers(id) ON DELETE SET NULL,
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_ad_projects_tenant ON ad_projects(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_ad_projects_advertiser ON ad_projects(tenant_id, advertiser_id);
+  `);
 }
 
 async function ensureBlogTables() {
@@ -123,6 +198,7 @@ async function ensureBlogTables() {
 }
 if (pgPool) {
   ensureBlogTables().catch(error => console.error('[Content Studio] blog table check failed:', error?.message || error));
+  ensureAdTables().catch(error => console.error('[Content Studio] ad table check failed:', error?.message || error));
 }
 
 function sendJson(res, status, body) {
@@ -182,7 +258,7 @@ const server = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url || '/', 'http://localhost');
 
     if (req.method === 'GET' && pathname === '/api/health') {
-      return sendJson(res, 200, { ok: true, service: 'howtom-content-studio', phase: '2A-blog', databaseConfigured: Boolean(DATABASE_URL), aiConfigured: false });
+      return sendJson(res, 200, { ok: true, service: 'howtom-content-studio', phase: '2B-blog-ad', databaseConfigured: Boolean(DATABASE_URL), aiConfigured: false });
     }
 
     if (req.method === 'POST' && pathname === '/api/login') {
@@ -212,6 +288,54 @@ const server = http.createServer(async (req, res) => {
           FROM advertisers a WHERE a.tenant_id=$1 ORDER BY a.name
         `, [tenantId]);
         return sendJson(res, 200, result.rows);
+      }
+
+      if (pathname.startsWith('/api/ad/')) {
+        if (!requireDb(res)) return;
+        const tenantId = await getCurrentTenantId();
+        if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
+
+        if (req.method === 'GET' && pathname === '/api/ad/projects') {
+          const r = await pgPool.query(`SELECT id, data FROM ad_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
+        }
+        if (req.method === 'POST' && pathname === '/api/ad/projects') {
+          const body = await readJson(req);
+          let row = normalizeAdProject(body);
+          row.projectId = makeId('ad');
+          if (!row.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
+          if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+          row.advertiserName = advRes.rows[0].name;
+          await pgPool.query(`INSERT INTO ad_projects (id, tenant_id, advertiser_id, data) VALUES ($1,$2,$3,$4)`, [row.projectId, tenantId, advRes.rows[0].id, JSON.stringify(row)]);
+          return sendJson(res, 201, row);
+        }
+
+        const adProjectMatch = pathname.match(/^\/api\/ad\/projects\/([^/]+)$/);
+        if (adProjectMatch && req.method === 'GET') {
+          const id = decodeURIComponent(adProjectMatch[1]);
+          const r = await pgPool.query(`SELECT id, data FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return r.rows[0] ? sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id }) : sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
+        }
+        if (adProjectMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+          const id = decodeURIComponent(adProjectMatch[1]);
+          const patch = await readJson(req);
+          const cur = await pgPool.query(`SELECT data FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const current = cur.rows[0]?.data;
+          if (!current) return sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
+          const updated = normalizeAdProject(patch, { ...current, projectId:id });
+          if (!updated.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, updated.advertiserId]);
+          if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+          updated.advertiserName = advRes.rows[0].name;
+          await pgPool.query(`UPDATE ad_projects SET advertiser_id=$3, data=$4, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, advRes.rows[0].id, JSON.stringify(updated)]);
+          return sendJson(res, 200, updated);
+        }
+        if (adProjectMatch && req.method === 'DELETE') {
+          const id = decodeURIComponent(adProjectMatch[1]);
+          await pgPool.query(`DELETE FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return sendJson(res, 200, { ok: true });
+        }
       }
 
       if (pathname.startsWith('/api/blog/')) {
@@ -265,7 +389,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         if (req.method === 'GET' && pathname === '/api/blog/ai-status') return sendJson(res, 200, { configured: false, provider: null });
-        if (req.method === 'POST' && pathname === '/api/blog/generate') return sendJson(res, 409, { error: 'AI 원고 생성은 후속 단계에서 공통 AI Gateway로 연결합니다. 현재는 직접 작성·편집 기능을 사용하세요.' });
+        if (req.method === 'POST' && pathname === '/api/blog/generate') return sendJson(res, 409, { error: 'AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결합니다. 현재는 직접 작성·편집 기능을 사용하세요.' });
 
         const styleMatch = pathname.match(/^\/api\/blog\/styles\/([^/]+)$/);
         if (styleMatch && req.method === 'GET') {
@@ -307,5 +431,5 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`[HOWTOM Content Studio] PHASE 2A blog server listening on :${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`[HOWTOM Content Studio] PHASE 2B blog+ad server listening on :${PORT}`));
 process.on('SIGTERM', async () => { try { await pgPool?.end(); } catch {} server.close(() => process.exit(0)); });

@@ -101,4 +101,4 @@ writeFileSync(path.join(distDir, 'BUILD_INFO.json'), JSON.stringify({
   modules,
   note: 'OS별 Rollup optional dependency가 없는 검증 환경용 fallback build',
 }, null, 2));
-console.log(`[완료] Content Studio PHASE 2A portable build: ${modules}개 TS/TSX → dist`);
+console.log(`[완료] Content Studio PHASE 2B portable build: ${modules}개 TS/TSX → dist`);
