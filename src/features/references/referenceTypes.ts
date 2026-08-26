@@ -18,6 +18,8 @@ export type SearchResult = {
   likeCount?: number | null;
 };
 
+export type ReferenceAiAnalysis = { hookType: string; keyMessage: string; ctaAssessment: string; suggestions: string[] };
+
 export type SavedReference = {
   id: string;
   advertiserId: string | null;
@@ -30,6 +32,7 @@ export type SavedReference = {
   landingUrl: string | null; thumbnailUrl: string | null; adSnapshotUrl: string | null;
   startDate: string | null; isActive: boolean | null; flightDays: number | null;
   viewCount: number | null; likeCount: number | null;
+  aiAnalysis: ReferenceAiAnalysis | null;
   tags: string[]; memo: string | null; createdAt: string;
   boards: { boardId: string; boardName: string }[];
 };

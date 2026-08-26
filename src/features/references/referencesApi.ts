@@ -1,5 +1,5 @@
 import { apiFetch } from '../../context/AuthContext';
-import type { Competitor, ReferenceBoard, SavedReference, SearchResult } from './referenceTypes';
+import type { Competitor, ReferenceAiAnalysis, ReferenceBoard, SavedReference, SearchResult } from './referenceTypes';
 
 export const referencesApi = {
   connectorStatus: () => apiFetch<{ meta: boolean; youtube: boolean; instagram: boolean; tiktok: boolean; threads: boolean }>('/api/references/connector-status'),
@@ -8,6 +8,7 @@ export const referencesApi = {
   save: (body: Partial<SavedReference>) => apiFetch<{ id: string }>('/api/references', { method: 'POST', body: JSON.stringify(body) }),
   patch: (id: string, body: { memo?: string; tags?: string[] }) => apiFetch<{ ok: boolean }>(`/api/references/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   remove: (id: string) => apiFetch<{ ok: boolean }>(`/api/references/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  analyze: (id: string) => apiFetch<{ analysis: ReferenceAiAnalysis; analyzedAt: string }>(`/api/references/${encodeURIComponent(id)}/analyze`, { method: 'POST' }),
 
   boards: () => apiFetch<ReferenceBoard[]>('/api/reference-boards'),
   createBoard: (name: string, advertiserId?: string) => apiFetch<{ id: string; name: string }>('/api/reference-boards', { method: 'POST', body: JSON.stringify({ name, advertiserId }) }),

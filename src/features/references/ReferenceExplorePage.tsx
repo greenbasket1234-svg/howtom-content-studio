@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ExternalLink, FolderPlus, Save, Search, Trash2, Trophy } from 'lucide-react';
+import { ExternalLink, FolderPlus, Save, Search, Sparkles, Trash2, Trophy } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
 import { referencesApi } from './referencesApi';
@@ -24,6 +24,7 @@ export function ReferenceExplorePage() {
   const [boards, setBoards] = useState<ReferenceBoard[]>([]);
   const [boardPickerFor, setBoardPickerFor] = useState('');
   const [notice, setNotice] = useState('');
+  const [analyzingId, setAnalyzingId] = useState('');
 
   useEffect(() => { referencesApi.connectorStatus().then(setConnectorStatus).catch(() => setConnectorStatus({ meta: false, youtube: false, instagram: false, tiktok: false, threads: false })); }, []);
   const loadSaved = () => { referencesApi.list(selectedId || undefined).then(setSaved).catch(() => setSaved([])); };
@@ -63,6 +64,14 @@ export function ReferenceExplorePage() {
     try { await referencesApi.addToBoard(boardId, refId); setNotice('보드에 담았습니다.'); referencesApi.boards().then(setBoards); }
     catch (e) { setNotice(e instanceof Error ? e.message : '보드에 담지 못했습니다.'); }
     setBoardPickerFor('');
+  };
+  const runAnalysis = async (r: SavedReference) => {
+    setAnalyzingId(r.id);
+    try {
+      const res = await referencesApi.analyze(r.id);
+      setSaved(rows => rows.map(row => row.id === r.id ? { ...row, aiAnalysis: res.analysis } : row));
+    } catch (e) { setNotice(e instanceof Error ? e.message : 'AI 분석에 실패했습니다.'); }
+    setAnalyzingId('');
   };
   const useForProduction = (ref: SavedReference | SearchResult, route: string) => {
     const params = new URLSearchParams({
@@ -155,8 +164,17 @@ export function ReferenceExplorePage() {
                 {r.headline && <p style={{ fontWeight: 650 }}>{r.headline}</p>}
                 <p>{r.body || r.description || '-'}</p>
                 {r.platform === 'youtube' && r.viewCount !== null && <small style={{ color: 'var(--text-muted)' }}>조회수 {Number(r.viewCount).toLocaleString()}{r.likeCount !== null ? ` · 좋아요 ${Number(r.likeCount).toLocaleString()}` : ''}</small>}
+                {r.aiAnalysis && (
+                  <div style={{ background: '#f8fafc', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+                    <b style={{ color: 'var(--accent)' }}>후킹: {r.aiAnalysis.hookType}</b>
+                    <span>{r.aiAnalysis.keyMessage}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>CTA: {r.aiAnalysis.ctaAssessment}</span>
+                    {r.aiAnalysis.suggestions.length > 0 && <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>{r.aiAnalysis.suggestions.map((s, i) => <li key={i}>{s}</li>)}</ul>}
+                  </div>
+                )}
                 {r.boards.length > 0 && <div className="content-tag-row">{r.boards.map(b => <span key={b.boardId}>{b.boardName}</span>)}</div>}
                 <div className="content-card-actions" style={{ flexWrap: 'wrap', position: 'relative' }}>
+                  <button onClick={() => runAnalysis(r)} disabled={analyzingId === r.id}><Sparkles size={13} /> {analyzingId === r.id ? '분석 중...' : r.aiAnalysis ? '다시 분석' : 'AI 분석'}</button>
                   <button onClick={() => setBoardPickerFor(boardPickerFor === r.id ? '' : r.id)}><FolderPlus size={13} /> 보드에 담기</button>
                   {boardPickerFor === r.id && (
                     <div className="content-ref-picker-pop" style={{ position: 'absolute', top: '100%', left: 0, zIndex: 10, background: '#fff', width: 200 }}>

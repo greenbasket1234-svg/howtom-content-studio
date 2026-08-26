@@ -376,6 +376,8 @@ async function ensureReferenceTables() {
     );
     ALTER TABLE content_references ADD COLUMN IF NOT EXISTS view_count BIGINT;
     ALTER TABLE content_references ADD COLUMN IF NOT EXISTS like_count BIGINT;
+    ALTER TABLE content_references ADD COLUMN IF NOT EXISTS ai_analysis JSONB;
+    ALTER TABLE content_references ADD COLUMN IF NOT EXISTS ai_analyzed_at TIMESTAMPTZ;
   `);
 }
 
@@ -517,6 +519,56 @@ async function searchInstagramHashtag({ hashtag, igBusinessAccountId }) {
     isActive: true, flightDays: null, isLongRunning: false, platforms: ['instagram'],
     viewCount: null, likeCount: item.like_count ?? null,
   }));
+}
+
+/**
+ * AI Gateway (PHASE 7)
+ * ------------------------------------------------------------
+ * 콘텐츠 제작소 안의 여러 기능(블로그 초안, 레퍼런스 분석 등)이 전부 이 함수 하나를
+ * 공유합니다. 나중에 AI 공급사를 바꾸거나 추가할 때 이 파일의 이 부분만 고치면 됩니다.
+ * 각 기능은 "무엇을 물어볼지(system/user 프롬프트)"만 책임지고, "어떻게 호출할지"는
+ * 여기서 전부 처리합니다.
+ */
+const AI_PROVIDER = (process.env.AI_PROVIDER || '').trim().toLowerCase();
+const AI_API_KEY = process.env.AI_API_KEY || '';
+const AI_API_URL = process.env.AI_API_URL || '';
+const AI_MODEL = process.env.AI_MODEL || '';
+function aiConfigured() {
+  if (AI_PROVIDER === 'anthropic' || AI_PROVIDER === 'openai') return Boolean(AI_API_KEY);
+  if (AI_PROVIDER === 'custom') return Boolean(AI_API_URL);
+  return false;
+}
+/** system/user 프롬프트를 받아 AI의 텍스트 응답(문자열)을 그대로 돌려줍니다. */
+async function callAI({ system, user, maxTokens = 1500 }) {
+  if (!aiConfigured()) throw new Error('AI가 연결되지 않았습니다. 관리자가 AI_PROVIDER/AI_API_KEY(또는 AI_API_URL)를 설정해야 합니다.');
+  if (AI_PROVIDER === 'anthropic') {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'x-api-key': AI_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: AI_MODEL || 'claude-sonnet-4-6', max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || `Anthropic API HTTP ${res.status}`);
+    return Array.isArray(data.content) ? data.content.map(b => b.text || '').join('') : '';
+  }
+  if (AI_PROVIDER === 'openai') {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST', headers: { Authorization: `Bearer ${AI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: AI_MODEL || 'gpt-4o-mini', messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.7 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || `OpenAI API HTTP ${res.status}`);
+    return data?.choices?.[0]?.message?.content || '';
+  }
+  // 커스텀: 사내 AI 서버 등 자체 API를 붙일 때 사용합니다.
+  const res = await fetch(AI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ system, user }) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `커스텀 AI API HTTP ${res.status}`);
+  return data.text || data.result || JSON.stringify(data);
+}
+/** AI 응답에서 ```json 코드블록 등을 걷어내고 JSON으로 해석합니다. */
+function parseAiJsonResponse(text) {
+  const cleaned = String(text ?? '').replace(/```json/gi, '').replace(/```/g, '').trim();
+  try { return JSON.parse(cleaned); } catch { throw new Error('AI 응답을 JSON으로 해석할 수 없습니다.'); }
 }
 
 async function ensureBlogTables() {
@@ -927,7 +979,7 @@ const server = http.createServer(async (req, res) => {
             `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
                     r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
                     r.landing_url as "landingUrl", r.thumbnail_url as "thumbnailUrl", r.ad_snapshot_url as "adSnapshotUrl",
-                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.view_count as "viewCount", r.like_count as "likeCount", r.tags, r.memo,
+                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.view_count as "viewCount", r.like_count as "likeCount", r.ai_analysis as "aiAnalysis", r.tags, r.memo,
                     r.created_at as "createdAt",
                     COALESCE(json_agg(json_build_object('boardId', bi.board_id, 'boardName', b.name)) FILTER (WHERE bi.board_id IS NOT NULL), '[]') as boards
              FROM content_references r
@@ -977,6 +1029,34 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { ok: true });
         }
 
+        // AI 분석: 저장된 레퍼런스 하나를 AI로 분석해서 후킹 유형·핵심 소구점·개선 제안을 뽑아줍니다.
+        const refAnalyzeMatch = pathname.match(/^\/api\/references\/([^/]+)\/analyze$/);
+        if (refAnalyzeMatch && req.method === 'POST') {
+          if (!aiConfigured()) return sendJson(res, 400, { error: 'AI가 연결되지 않았습니다. 관리자가 AI_PROVIDER/AI_API_KEY를 설정해야 합니다.' });
+          const id = decodeURIComponent(refAnalyzeMatch[1]);
+          const cur = await pgPool.query(`SELECT * FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const ref = cur.rows[0];
+          if (!ref) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          const contentText = [ref.headline, ref.body, ref.description].filter(Boolean).join('\n');
+          if (!contentText.trim()) return sendJson(res, 400, { error: '분석할 텍스트(제목·본문)가 없는 레퍼런스입니다.' });
+          const system = `당신은 광고·콘텐츠 카피를 분석하는 전문가입니다. 주어진 광고/콘텐츠 문구를 분석해서 반드시 아래 JSON 형식으로만 응답하세요. 그 외 설명이나 코드블록 표시는 절대 포함하지 마세요.\n{"hookType": "이 콘텐츠가 쓰는 후킹 방식 한 단어(예: 가격 소구, 후기형, 문제제기형, 희소성, 숫자 제시 등)", "keyMessage": "핵심 소구점 한 문장", "ctaAssessment": "CTA(행동유도) 문구에 대한 짧은 평가", "suggestions": ["우리 광고에 참고할 만한 개선 아이디어 1", "개선 아이디어 2", "개선 아이디어 3"]}`;
+          const user = `플랫폼: ${ref.platform}\n제목: ${ref.headline || '(없음)'}\n본문: ${ref.body || '(없음)'}\n설명: ${ref.description || '(없음)'}\nCTA: ${ref.cta || '(없음)'}`;
+          try {
+            const raw = await callAI({ system, user, maxTokens: 800 });
+            const parsed = parseAiJsonResponse(raw);
+            const analysis = {
+              hookType: cleanText(String(parsed.hookType || ''), 100),
+              keyMessage: cleanText(String(parsed.keyMessage || ''), 300),
+              ctaAssessment: cleanText(String(parsed.ctaAssessment || ''), 300),
+              suggestions: (Array.isArray(parsed.suggestions) ? parsed.suggestions : []).slice(0, 5).map(s => cleanText(String(s), 200)),
+            };
+            await pgPool.query(`UPDATE content_references SET ai_analysis=$3, ai_analyzed_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(analysis)]);
+            return sendJson(res, 200, { analysis, analyzedAt: new Date().toISOString() });
+          } catch (error) {
+            return sendJson(res, 502, { error: error instanceof Error ? `AI 분석에 실패했습니다: ${error.message}` : 'AI 분석에 실패했습니다.' });
+          }
+        }
+
         // 레퍼런스 보드 CRUD
         if (req.method === 'GET' && pathname === '/api/reference-boards') {
           const r = await pgPool.query(
@@ -1014,7 +1094,7 @@ const server = http.createServer(async (req, res) => {
             `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
                     r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
                     r.landing_url as "landingUrl", r.thumbnail_url as "thumbnailUrl", r.ad_snapshot_url as "adSnapshotUrl",
-                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.view_count as "viewCount", r.like_count as "likeCount", r.tags, r.memo, r.created_at as "createdAt"
+                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.view_count as "viewCount", r.like_count as "likeCount", r.ai_analysis as "aiAnalysis", r.tags, r.memo, r.created_at as "createdAt"
              FROM reference_board_items bi
              JOIN content_references r ON r.id = bi.reference_id
              LEFT JOIN advertisers a ON a.id = r.advertiser_id
@@ -1113,8 +1193,23 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { ok: true });
         }
 
-        if (req.method === 'GET' && pathname === '/api/blog/ai-status') return sendJson(res, 200, { configured: false, provider: null });
-        if (req.method === 'POST' && pathname === '/api/blog/generate') return sendJson(res, 409, { error: 'AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결합니다. 현재는 직접 작성·편집 기능을 사용하세요.' });
+        if (req.method === 'GET' && pathname === '/api/blog/ai-status') return sendJson(res, 200, { configured: aiConfigured(), provider: AI_PROVIDER || null });
+        if (req.method === 'POST' && pathname === '/api/blog/generate') {
+          const body = await readJson(req);
+          const keyword = cleanText(body.primaryKeyword, 200);
+          if (!keyword) return sendJson(res, 400, { error: '메인 키워드를 입력하세요.' });
+          const system = `당신은 ${cleanText(body.industry || '업종 무관', 60)} 업종 광고주를 위한 ${cleanText(body.platform || '블로그', 60)} 원고를 쓰는 전문 카피라이터입니다.\n과장·단정 표현, 치료효과 단정, 비교·비방 표현은 피하고 확인 가능한 사실 중심으로 작성합니다.\n반드시 아래 JSON 형식으로만 응답하세요. 그 외 설명 문장이나 코드블록 표시는 절대 포함하지 마세요.\n{"titles": ["제목1", "제목2", "제목3"], "blocks": [{"type": "paragraph|h2|faq|cta", "title": "블록 제목", "text": "본문"}]}\nblocks는 도입 1개, 핵심정보 h2 1개 이상, 확인사항 h2 1개, FAQ 1개, CTA 1개를 포함해 5~7개로 구성하세요.`;
+          const user = `메인 키워드: ${keyword}\n서브 키워드: ${(Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords : []).join(', ') || '없음'}\n지역: ${cleanText(body.region || '없음', 60)}\n목표 글자 수: 약 ${Number(body.targetLength) || 2000}자\n톤앤매너: ${cleanText(body.tone || '자연스러운 정보 전달형', 60)}`;
+          try {
+            const raw = await callAI({ system, user, maxTokens: 2200 });
+            const parsed = parseAiJsonResponse(raw);
+            const titles = (parsed.titles || []).slice(0, 5).map(t => cleanText(String(t), 200));
+            const blocks = (parsed.blocks || []).slice(0, 10).map((b, i) => ({ blockId: `block-${Date.now()}-${i}`, type: cleanText(String(b?.type || 'paragraph'), 20), title: cleanText(String(b?.title || ''), 200), text: cleanText(String(b?.text || ''), 4000) }));
+            return sendJson(res, 200, { generator: `ai:${AI_PROVIDER}`, titles, blocks });
+          } catch (error) {
+            return sendJson(res, 502, { error: error instanceof Error ? `AI 원고 생성에 실패했습니다: ${error.message}` : 'AI 원고 생성에 실패했습니다.' });
+          }
+        }
 
         const styleMatch = pathname.match(/^\/api\/blog\/styles\/([^/]+)$/);
         if (styleMatch && req.method === 'GET') {
