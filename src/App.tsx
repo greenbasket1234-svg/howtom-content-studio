@@ -9,6 +9,7 @@ import { StubPage } from './pages/stub/StubPage';
 import { BlogProductionPage } from './features/blog/BlogProductionPage';
 import { AdCreationPage } from './features/ad/AdCreationPage';
 import { TemplatesPage } from './features/templates/TemplatesPage';
+import { DocumentWritingPage } from './features/document/DocumentWritingPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -40,7 +41,7 @@ export default function App() {
       <Route path="/production/blog" element={<RequireAuth><BlogProductionPage /></RequireAuth>} />
       <Route path="/production/image" element={<Stub title="이미지 제작" phase="PHASE 2" />} />
       <Route path="/production/video-script" element={<Stub title="영상 대본" phase="PHASE 2" />} />
-      <Route path="/production/document" element={<Stub title="문서 작성" phase="PHASE 2" />} />
+      <Route path="/production/document" element={<RequireAuth><DocumentWritingPage /></RequireAuth>} />
 
       <Route path="/library" element={<Stub title="제작물 보관함" phase="PHASE 2" />} />
       <Route path="/calendar" element={<Stub title="콘텐츠 캘린더" phase="PHASE 2" />} />

@@ -215,6 +215,42 @@ async function ensureTemplateTables() {
   `);
 }
 
+function normalizeDocumentProject(body = {}, current = null) {
+  const base = current || {};
+  const blocksSource = Array.isArray(body.blocks) ? body.blocks : (Array.isArray(base.blocks) ? base.blocks : []);
+  const blocks = blocksSource.slice(0, 60).map((b, i) => ({
+    blockId: cleanText(b?.blockId || `doc-${i + 1}`, 60),
+    type: cleanText(b?.type || 'paragraph', 20),
+    title: cleanText(b?.title || '', 200),
+    text: cleanText(b?.text || '', 8000),
+  }));
+  return {
+    ...base,
+    projectId: base.projectId || cleanText(body.projectId || '', 120),
+    title: cleanText(body.title ?? base.title ?? '새 문서', 240),
+    advertiserId: cleanText(body.advertiserId ?? base.advertiserId ?? '', 120),
+    advertiserName: cleanText(body.advertiserName ?? base.advertiserName ?? '', 160),
+    documentType: cleanText(body.documentType ?? base.documentType ?? '기획서', 60),
+    blocks,
+    status: cleanText(body.status ?? base.status ?? 'draft', 40),
+  };
+}
+
+async function ensureDocumentTables() {
+  if (!pgPool) return;
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS document_projects (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID REFERENCES advertisers(id) ON DELETE SET NULL,
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_projects_tenant ON document_projects(tenant_id);
+  `);
+}
+
 async function ensureBlogTables() {
   if (!pgPool) return;
   await pgPool.query(`
@@ -245,6 +281,7 @@ if (pgPool) {
   ensureBlogTables().catch(error => console.error('[Content Studio] blog table check failed:', error?.message || error));
   ensureAdTables().catch(error => console.error('[Content Studio] ad table check failed:', error?.message || error));
   ensureTemplateTables().catch(error => console.error('[Content Studio] template table check failed:', error?.message || error));
+  ensureDocumentTables().catch(error => console.error('[Content Studio] document table check failed:', error?.message || error));
 }
 
 function sendJson(res, status, body) {
@@ -449,6 +486,49 @@ const server = http.createServer(async (req, res) => {
           const advertiserUuid = row.advertiserId ? (await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId])).rows[0]?.id || null : null;
           await pgPool.query(`INSERT INTO content_templates (id, tenant_id, advertiser_id, template_type, data) VALUES ($1,$2,$3,$4,$5)`, [row.templateId, tenantId, advertiserUuid, row.templateType, JSON.stringify(row)]);
           return sendJson(res, 201, row);
+        }
+      }
+
+      if (pathname.startsWith('/api/documents')) {
+        if (!requireDb(res)) return;
+        const tenantId = await getCurrentTenantId();
+        if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
+
+        if (req.method === 'GET' && pathname === '/api/documents') {
+          const r = await pgPool.query(`SELECT id, data FROM document_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
+        }
+        if (req.method === 'POST' && pathname === '/api/documents') {
+          const body = await readJson(req);
+          const row = normalizeDocumentProject(body);
+          row.projectId = makeId('doc');
+          if (!row.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
+          if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+          row.advertiserName = advRes.rows[0].name;
+          await pgPool.query(`INSERT INTO document_projects (id, tenant_id, advertiser_id, data) VALUES ($1,$2,$3,$4)`, [row.projectId, tenantId, advRes.rows[0].id, JSON.stringify(row)]);
+          return sendJson(res, 201, row);
+        }
+        const docMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
+        if (docMatch && req.method === 'GET') {
+          const id = decodeURIComponent(docMatch[1]);
+          const r = await pgPool.query(`SELECT id, data FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return r.rows[0] ? sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id }) : sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
+        }
+        if (docMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+          const id = decodeURIComponent(docMatch[1]);
+          const patch = await readJson(req);
+          const cur = await pgPool.query(`SELECT data FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const current = cur.rows[0]?.data;
+          if (!current) return sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
+          const updated = normalizeDocumentProject(patch, { ...current, projectId: id });
+          await pgPool.query(`UPDATE document_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
+          return sendJson(res, 200, updated);
+        }
+        if (docMatch && req.method === 'DELETE') {
+          const id = decodeURIComponent(docMatch[1]);
+          await pgPool.query(`DELETE FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return sendJson(res, 200, { ok: true });
         }
       }
 
