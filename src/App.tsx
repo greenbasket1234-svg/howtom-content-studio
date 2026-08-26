@@ -16,6 +16,7 @@ import { ContentCalendarPage } from './features/calendar/ContentCalendarPage';
 import { AssetsPage } from './features/assets/AssetsPage';
 import { ReferenceExplorePage } from './features/references/ReferenceExplorePage';
 import { CompetitorMonitoringPage } from './features/references/CompetitorMonitoringPage';
+import { ReferenceBoardsPage } from './features/references/ReferenceBoardsPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -40,7 +41,7 @@ export default function App() {
       {/* PHASE 2B: 블로그 + 광고 제작만 실제 기능으로 이전. 나머지는 승인 전까지 Stub 유지. */}
       <Route path="/references" element={<RequireAuth><ReferenceExplorePage /></RequireAuth>} />
       <Route path="/references/competitors" element={<RequireAuth><CompetitorMonitoringPage /></RequireAuth>} />
-      <Route path="/references/boards" element={<Stub title="레퍼런스 보드" phase="PHASE 3" />} />
+      <Route path="/references/boards" element={<RequireAuth><ReferenceBoardsPage /></RequireAuth>} />
       <Route path="/references/settings" element={<Stub title="수집 설정" phase="PHASE 3" />} />
 
       <Route path="/production/ad" element={<RequireAuth><AdCreationPage /></RequireAuth>} />

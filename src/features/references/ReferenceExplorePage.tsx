@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ExternalLink, Save, Search, Trash2, Trophy } from 'lucide-react';
+import { ExternalLink, FolderPlus, Save, Search, Trash2, Trophy } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
 import { referencesApi } from './referencesApi';
-import type { SavedReference, SearchResult } from './referenceTypes';
+import type { ReferenceBoard, SavedReference, SearchResult } from './referenceTypes';
 
 const fmt = (v?: string | null) => { if (!v) return '-'; const d = new Date(v); return Number.isNaN(d.getTime()) ? '-' : `${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}.`; };
 
@@ -17,11 +17,13 @@ export function ReferenceExplorePage() {
   const [results, setResults] = useState<SearchResult[] | null>(null);
   const [searchError, setSearchError] = useState('');
   const [saved, setSaved] = useState<SavedReference[]>([]);
+  const [boards, setBoards] = useState<ReferenceBoard[]>([]);
+  const [boardPickerFor, setBoardPickerFor] = useState('');
   const [notice, setNotice] = useState('');
 
   useEffect(() => { referencesApi.connectorStatus().then(s => setConnectorConfigured(s.configured)).catch(() => setConnectorConfigured(false)); }, []);
   const loadSaved = () => { referencesApi.list(selectedId || undefined).then(setSaved).catch(() => setSaved([])); };
-  useEffect(() => { loadSaved(); }, [selectedId]);
+  useEffect(() => { loadSaved(); referencesApi.boards().then(setBoards).catch(() => setBoards([])); }, [selectedId]);
 
   const runSearch = async () => {
     if (!keyword.trim()) { setSearchError('검색어를 입력하세요.'); return; }
@@ -48,6 +50,11 @@ export function ReferenceExplorePage() {
   const removeSaved = async (id: string) => {
     if (!confirm('이 레퍼런스를 삭제할까요?')) return;
     try { await referencesApi.remove(id); loadSaved(); } catch (e) { setNotice(e instanceof Error ? e.message : '삭제하지 못했습니다.'); }
+  };
+  const addToBoard = async (refId: string, boardId: string) => {
+    try { await referencesApi.addToBoard(boardId, refId); setNotice('보드에 담았습니다.'); referencesApi.boards().then(setBoards); }
+    catch (e) { setNotice(e instanceof Error ? e.message : '보드에 담지 못했습니다.'); }
+    setBoardPickerFor('');
   };
   const useForProduction = (ref: SavedReference | SearchResult, route: string) => {
     const params = new URLSearchParams({
@@ -113,7 +120,13 @@ export function ReferenceExplorePage() {
                 {r.headline && <p style={{ fontWeight: 650 }}>{r.headline}</p>}
                 <p>{r.body || r.description || '-'}</p>
                 {r.boards.length > 0 && <div className="content-tag-row">{r.boards.map(b => <span key={b.boardId}>{b.boardName}</span>)}</div>}
-                <div className="content-card-actions" style={{ flexWrap: 'wrap' }}>
+                <div className="content-card-actions" style={{ flexWrap: 'wrap', position: 'relative' }}>
+                  <button onClick={() => setBoardPickerFor(boardPickerFor === r.id ? '' : r.id)}><FolderPlus size={13} /> 보드에 담기</button>
+                  {boardPickerFor === r.id && (
+                    <div className="content-ref-picker-pop" style={{ position: 'absolute', top: '100%', left: 0, zIndex: 10, background: '#fff', width: 200 }}>
+                      {boards.length ? boards.map(b => <label key={b.id} onClick={() => addToBoard(r.id, b.id)} style={{ cursor: 'pointer' }}>{b.name}</label>) : <small style={{ color: 'var(--text-muted)' }}>보드가 없습니다. "레퍼런스 보드"에서 먼저 만들어주세요.</small>}
+                    </div>
+                  )}
                   <button onClick={() => useForProduction(r, '/production/ad')}>광고 문구 만들기</button>
                   <button onClick={() => useForProduction(r, '/production/blog')}>블로그 만들기</button>
                   <button onClick={() => useForProduction(r, '/production/video-script')}>영상 대본 만들기</button>

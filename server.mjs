@@ -886,9 +886,32 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 201, { id, name });
         }
         const boardMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)$/);
+        if (boardMatch && req.method === 'PATCH') {
+          const id = decodeURIComponent(boardMatch[1]);
+          const body = await readJson(req);
+          const name = cleanText(body.name, 120);
+          if (!name) return sendJson(res, 400, { error: '보드 이름을 입력하세요.' });
+          await pgPool.query(`UPDATE reference_boards SET name=$3 WHERE tenant_id=$1 AND id=$2`, [tenantId, id, name]);
+          return sendJson(res, 200, { ok: true });
+        }
         if (boardMatch && req.method === 'DELETE') {
           await pgPool.query(`DELETE FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(boardMatch[1])]);
           return sendJson(res, 200, { ok: true });
+        }
+        const boardDetailMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
+        if (boardDetailMatch && req.method === 'GET') {
+          const r = await pgPool.query(
+            `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
+                    r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
+                    r.landing_url as "landingUrl", r.thumbnail_url as "thumbnailUrl", r.ad_snapshot_url as "adSnapshotUrl",
+                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.tags, r.memo, r.created_at as "createdAt"
+             FROM reference_board_items bi
+             JOIN content_references r ON r.id = bi.reference_id
+             LEFT JOIN advertisers a ON a.id = r.advertiser_id
+             WHERE bi.board_id=$1 AND r.tenant_id=$2 ORDER BY bi.added_at DESC`,
+            [decodeURIComponent(boardDetailMatch[1]), tenantId]
+          );
+          return sendJson(res, 200, r.rows.map(row => ({ ...row, boards: [] })));
         }
         const boardItemMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
         if (boardItemMatch && req.method === 'POST') {

@@ -11,7 +11,9 @@ export const referencesApi = {
 
   boards: () => apiFetch<ReferenceBoard[]>('/api/reference-boards'),
   createBoard: (name: string, advertiserId?: string) => apiFetch<{ id: string; name: string }>('/api/reference-boards', { method: 'POST', body: JSON.stringify({ name, advertiserId }) }),
+  renameBoard: (id: string, name: string) => apiFetch<{ ok: boolean }>(`/api/reference-boards/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteBoard: (id: string) => apiFetch<{ ok: boolean }>(`/api/reference-boards/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  boardItems: (id: string) => apiFetch<SavedReference[]>(`/api/reference-boards/${encodeURIComponent(id)}/items`),
   addToBoard: (boardId: string, referenceId: string) => apiFetch<{ ok: boolean }>(`/api/reference-boards/${encodeURIComponent(boardId)}/items`, { method: 'POST', body: JSON.stringify({ referenceId }) }),
   removeFromBoard: (boardId: string, referenceId: string) => apiFetch<{ ok: boolean }>(`/api/reference-boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(referenceId)}`, { method: 'DELETE' }),
 
