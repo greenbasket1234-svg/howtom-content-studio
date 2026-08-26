@@ -1,15 +1,17 @@
 // ============================================================
-// HOWTOM 콘텐츠 제작소 — PHASE 2B 서버
+// HOWTOM 콘텐츠 제작소 서버
 // ------------------------------------------------------------
 // 현재 실제 기능:
-//   1) 관리자 로그인
+//   1) 관리자 로그인 (Universe와 같은 계정, 세션은 별도)
 //   2) 공통 PostgreSQL 광고주 조회
-//   3) 블로그 제작 프로젝트/문체/사진자산 CRUD
-//   4) 광고 제작 프로젝트 CRUD
-//   5) dist/ 정적 파일 + SPA 라우팅
+//   3) 제작: 광고/블로그/영상대본/문서/템플릿/자산 CRUD (전부 PostgreSQL)
+//   4) 레퍼런스: Meta 광고 라이브러리 / YouTube / Instagram 검색·저장·보드·경쟁사
+//   5) 레퍼런스 자동 수집 Worker (매일 KST 8·20시)
+//   6) 공용 AI Gateway (레퍼런스 AI 분석 등 - 블로그 원고 생성과는 별개)
+//   7) dist/ 정적 파일 + SPA 라우팅
 //
-// AI 원고 생성은 아직 연결하지 않습니다. 정확한 수치/콘텐츠 데이터는
-// PostgreSQL을 Source of Truth로 사용하고, 블로그 AI 원고는 제휴 업체 API 확정 후 연결합니다.
+// 미구현: 이미지 제작, TikTok/Threads 커넥터, AI 의미 기반 검색
+// 상세 상태·우선순위는 저장소 루트 PRD.md 참고.
 // ============================================================
 import http from 'node:http';
 import fs from 'node:fs';
@@ -571,6 +573,38 @@ function parseAiJsonResponse(text) {
   try { return JSON.parse(cleaned); } catch { throw new Error('AI 응답을 JSON으로 해석할 수 없습니다.'); }
 }
 
+/**
+ * BlogGenerationProvider (제휴 업체 API Adapter)
+ * ------------------------------------------------------------
+ * 블로그 원고 생성은 위의 공용 AI Gateway(callAI)와 의도적으로 분리합니다.
+ * 이유: 나중에 블로그 원고 제휴 업체가 바뀌거나 확정되어도, 레퍼런스 분석 등
+ * 다른 AI 기능(공용 Gateway 사용)에는 영향이 없도록 하기 위함입니다.
+ * 제휴 업체가 확정되기 전까지는 아래 두 환경변수가 비어있고, 이 경우
+ * "연동 필요" 상태를 정직하게 반환합니다(가짜 원고를 만들지 않음).
+ */
+const BLOG_PARTNER_API_URL = process.env.BLOG_PARTNER_API_URL || '';
+const BLOG_PARTNER_API_KEY = process.env.BLOG_PARTNER_API_KEY || '';
+function blogGenerationConfigured() { return Boolean(BLOG_PARTNER_API_URL); }
+
+/** 제휴 업체 API를 호출합니다. 업체가 확정되면 이 함수 내부(요청/응답 형식)만 그 업체 규격에 맞춰 고치면 됩니다. */
+async function callBlogGenerationProvider(brief) {
+  if (!blogGenerationConfigured()) throw new Error('블로그 원고 생성 제휴 업체 API가 아직 연결되지 않았습니다. 관리자가 BLOG_PARTNER_API_URL/BLOG_PARTNER_API_KEY를 설정해야 합니다. 그동안은 직접 작성·편집 기능을 사용하세요.');
+  const res = await fetch(BLOG_PARTNER_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(BLOG_PARTNER_API_KEY ? { Authorization: `Bearer ${BLOG_PARTNER_API_KEY}` } : {}) },
+    body: JSON.stringify(brief),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `제휴 업체 API HTTP ${res.status}`);
+  // 표준 응답 형식: { title/titles, content/blocks, ... }. 업체 응답이 이 형식과 다르면 이 부분만 맞춰 변환합니다.
+  const titles = Array.isArray(data.titles) ? data.titles : (data.title ? [data.title] : []);
+  const blocks = Array.isArray(data.blocks) ? data.blocks : [];
+  return {
+    titles: titles.slice(0, 5).map(t => cleanText(String(t), 200)),
+    blocks: blocks.slice(0, 10).map((b, i) => ({ blockId: `block-${Date.now()}-${i}`, type: cleanText(String(b?.type || 'paragraph'), 20), title: cleanText(String(b?.title || ''), 200), text: cleanText(String(b?.text || ''), 4000) })),
+  };
+}
+
 async function ensureBlogTables() {
   if (!pgPool) return;
   await pgPool.query(`
@@ -943,8 +977,11 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && pathname === '/api/references/search') {
           const body = await readJson(req);
           const platform = cleanText(body.platform || 'meta', 20);
-          if (platform === 'tiktok' || platform === 'threads') {
-            return sendJson(res, 200, { status: 'error', error: `${platform === 'tiktok' ? 'TikTok' : 'Threads'}는 일반 앱이 쓸 수 있는 공개 콘텐츠 검색 API가 아직 없어 지원하지 않습니다(가짜 데이터를 만들지 않습니다).` });
+          if (platform === 'threads') {
+            return sendJson(res, 200, { status: 'error', error: 'Threads는 Meta 공식 keyword_search API가 존재하지만, HOWTOM 커넥터가 아직 준비되지 않았습니다(연동 필요). 플랫폼 자체가 불가능한 것은 아닙니다.' });
+          }
+          if (platform === 'tiktok') {
+            return sendJson(res, 200, { status: 'error', error: 'TikTok Commercial Content API는 현재 EU 지역 데이터만 제공하고 연구자 승인제로 운영되어, 한국 상업 광고주 대상인 HOWTOM에서 바로 사용하기 어렵습니다(연동 필요, 자격·지역 요건 재확인 필요).' });
           }
           try {
             const results = platform === 'youtube'
@@ -1193,21 +1230,21 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { ok: true });
         }
 
-        if (req.method === 'GET' && pathname === '/api/blog/ai-status') return sendJson(res, 200, { configured: aiConfigured(), provider: AI_PROVIDER || null });
+        if (req.method === 'GET' && pathname === '/api/blog/ai-status') return sendJson(res, 200, { configured: blogGenerationConfigured(), provider: blogGenerationConfigured() ? 'partner' : null });
         if (req.method === 'POST' && pathname === '/api/blog/generate') {
           const body = await readJson(req);
           const keyword = cleanText(body.primaryKeyword, 200);
           if (!keyword) return sendJson(res, 400, { error: '메인 키워드를 입력하세요.' });
-          const system = `당신은 ${cleanText(body.industry || '업종 무관', 60)} 업종 광고주를 위한 ${cleanText(body.platform || '블로그', 60)} 원고를 쓰는 전문 카피라이터입니다.\n과장·단정 표현, 치료효과 단정, 비교·비방 표현은 피하고 확인 가능한 사실 중심으로 작성합니다.\n반드시 아래 JSON 형식으로만 응답하세요. 그 외 설명 문장이나 코드블록 표시는 절대 포함하지 마세요.\n{"titles": ["제목1", "제목2", "제목3"], "blocks": [{"type": "paragraph|h2|faq|cta", "title": "블록 제목", "text": "본문"}]}\nblocks는 도입 1개, 핵심정보 h2 1개 이상, 확인사항 h2 1개, FAQ 1개, CTA 1개를 포함해 5~7개로 구성하세요.`;
-          const user = `메인 키워드: ${keyword}\n서브 키워드: ${(Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords : []).join(', ') || '없음'}\n지역: ${cleanText(body.region || '없음', 60)}\n목표 글자 수: 약 ${Number(body.targetLength) || 2000}자\n톤앤매너: ${cleanText(body.tone || '자연스러운 정보 전달형', 60)}`;
           try {
-            const raw = await callAI({ system, user, maxTokens: 2200 });
-            const parsed = parseAiJsonResponse(raw);
-            const titles = (parsed.titles || []).slice(0, 5).map(t => cleanText(String(t), 200));
-            const blocks = (parsed.blocks || []).slice(0, 10).map((b, i) => ({ blockId: `block-${Date.now()}-${i}`, type: cleanText(String(b?.type || 'paragraph'), 20), title: cleanText(String(b?.title || ''), 200), text: cleanText(String(b?.text || ''), 4000) }));
-            return sendJson(res, 200, { generator: `ai:${AI_PROVIDER}`, titles, blocks });
+            const brief = {
+              industry: cleanText(body.industry || '업종 무관', 60), platform: cleanText(body.platform || '블로그', 60),
+              primaryKeyword: keyword, secondaryKeywords: Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords : [],
+              region: cleanText(body.region || '', 60), targetLength: Number(body.targetLength) || 2000, tone: cleanText(body.tone || '자연스러운 정보 전달형', 60),
+            };
+            const { titles, blocks } = await callBlogGenerationProvider(brief);
+            return sendJson(res, 200, { generator: 'partner', titles, blocks });
           } catch (error) {
-            return sendJson(res, 502, { error: error instanceof Error ? `AI 원고 생성에 실패했습니다: ${error.message}` : 'AI 원고 생성에 실패했습니다.' });
+            return sendJson(res, 502, { error: error instanceof Error ? error.message : 'AI 원고 생성에 실패했습니다.' });
           }
         }
 
@@ -1320,5 +1357,5 @@ function scheduleReferenceWorker() {
 }
 if (pgPool) scheduleReferenceWorker();
 
-server.listen(PORT, '0.0.0.0', () => console.log(`[HOWTOM Content Studio] PHASE 2B blog+ad server listening on :${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`[HOWTOM Content Studio] listening on :${PORT}`));
 process.on('SIGTERM', async () => { try { await pgPool?.end(); } catch {} server.close(() => process.exit(0)); });

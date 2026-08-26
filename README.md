@@ -1,74 +1,44 @@
-# HOWTOM 콘텐츠 제작소 — PHASE 2B · 블로그 + 광고 제작
+# HOWTOM 콘텐츠 제작소
 
-HOWTOM 유니버스에서 콘텐츠 기능을 별도 웹앱으로 안전하게 분리하는 프로젝트입니다.
-PHASE 1의 앱 분리 기반 위에 **블로그 제작 기능 하나만** 실제 기능으로 이전했습니다.
+HOWTOM 유니버스(광고 운영)에서 콘텐츠 관련 기능을 분리한 독립 웹앱입니다.
+유니버스와 같은 PostgreSQL, 같은 `advertiser_id`를 공유하지만 서버는 완전히 분리되어 있습니다.
 
-## 현재 실제 구현 범위
+> 상세 제품 정의·상태 기준·우선순위는 저장소 루트의 `PRD.md`를 참고하세요.
+> 이 README는 "이 프로젝트를 어떻게 실행·배포하는가"에 집중합니다.
 
-- Content Studio 별도 React 앱
-- HOWTOM 관리자 로그인
-- Universe와 같은 PostgreSQL 공유
-- 같은 `advertiser_id` 사용
-- 광고주 선택 `전체 보기` / 개별 광고주
-- Universe ↔ Content Studio App Switcher
-- **블로그 프로젝트 목록/생성/수정/삭제**
-- **광고주별 블로그 문체 프로필 저장**
-- **블로그용 사진 자산 메타데이터 저장**
-- SEO 사전 점검
-- 업종별 표현/의료광고 사전 점검
-- 심의 완료 문안 잠금/재검토
-- TXT/HTML 내보내기
-- Desktop / Tablet / Mobile 반응형
+## 현재 구현 범위 (2026-08-26 기준)
 
-## 아직 Stub으로 유지하는 기능
+| 영역 | 기능 | 비고 |
+|---|---|---|
+| 기반 | 앱 분리, 공통 광고주 선택, Universe ↔ 상호 이동 | |
+| 제작 | 광고 제작 | `ad_projects` |
+| 제작 | 블로그 제작 (SEO·업종별 규정 점검·심의 잠금 포함) | `blog_projects`, `blog_styles`, `blog_assets` |
+| 제작 | 영상 대본 (타임라인 편집) | `video_script_projects` |
+| 제작 | 문서 작성 (블록 편집) | `document_projects` |
+| 제작 | 템플릿 (복제/버전 관리) | `content_templates` |
+| 제작 | 자산 (이미지/영상/문서, URL 등록 방식) | `content_assets` |
+| 제작 | 제작물 보관함 / 콘텐츠 캘린더 | 위 4개 프로젝트 테이블 통합 조회 |
+| 레퍼런스 | 레퍼런스 탐색 (Meta 광고 / YouTube / Instagram 해시태그) | `content_references` |
+| 레퍼런스 | 경쟁사 모니터링 (수동 "지금 수집") | `reference_competitors` |
+| 레퍼런스 | 레퍼런스 보드 | `reference_boards`, `reference_board_items` |
+| 레퍼런스 | 자동 수집 Worker (매일 KST 8·20시) | 서버 내부 스케줄러 |
+| AI | 공용 AI Gateway (레퍼런스 AI 분석 등) | Anthropic/OpenAI/custom |
+| AI | 블로그 AI 원고 생성 | 제휴 업체 API Adapter 방식 (아래 참고) |
 
-- 레퍼런스 탐색 / 경쟁사 모니터링 / 보드 / 수집 설정
-- 광고 제작
-- 이미지 제작
-- 영상 대본
-- 문서 작성
-- 제작물 보관함
-- 콘텐츠 캘린더
-- 템플릿
-- 이미지/영상/문서 자산 메뉴
-- 자동 수집 Worker
-
-이 기능들은 한꺼번에 구현하지 않습니다.
+**미구현**: 이미지 제작, TikTok/Threads 커넥터, AI 의미 기반 검색
 
 ## AI 정책
 
-현재는 **새로운 AI 원고 API를 연결하지 않습니다.**
+콘텐츠 제작소는 AI를 **두 개의 서로 다른 경로**로 나눕니다.
 
-- `/api/blog/ai-status` → `configured: false`
-- 블로그 화면의 `초안 만들기` 버튼은 AI가 연결되기 전까지 비활성화
-- 직접 작성/편집/저장/SEO/규정 점검은 정상 사용 가능
-- 블로그 AI 원고 작성은 **제휴 업체 API가 확정된 뒤 서버 Adapter 방식으로 연결**
+1. **공용 AI Gateway** (`AI_PROVIDER`/`AI_API_KEY`) — 레퍼런스 AI 분석 등 "해석·분석" 용도
+2. **블로그 AI 원고 생성** (`BLOG_PARTNER_API_URL`/`BLOG_PARTNER_API_KEY`) — 제휴 업체가 확정되기 전까지는 `/api/blog/generate`가 "연동 필요" 상태를 정직하게 반환합니다. 가짜 원고를 만들어내지 않습니다.
 
-즉 블로그 데이터 저장과 업무 흐름을 먼저 완성하고 AI는 후순위로 둡니다.
-
-## 기존 Universe 블로그 데이터
-
-Content Studio는 Universe와 **동일 PostgreSQL의 기존 테이블을 그대로 사용**합니다.
-
-- `blog_projects`
-- `blog_styles`
-- `blog_assets`
-- `advertisers`
-
-따라서 기존 Universe에서 작성한 블로그 데이터가 같은 DB에 있다면 별도 복사 없이 Content Studio에서도 조회합니다.
-
-PHASE 2A 검증이 끝나기 전까지 Universe의 기존 블로그 메뉴/코드는 삭제하지 않습니다.
+두 경로를 하나로 합치지 않는 이유는, 나중에 블로그 원고 제휴사가 바뀌어도 다른 AI 기능(레퍼런스 분석 등)에 영향이 없도록 하기 위해서입니다.
 
 ## 광고주 범위 선택
 
-상단 광고주 선택기는 다음 범위를 제공합니다.
-
-- `전체 보기`: 접근 가능한 모든 광고주
-- 개별 광고주: 해당 `advertiser_id` 하나
-
-블로그 목록도 전체 보기 상태에서는 모든 광고주의 프로젝트를 볼 수 있습니다.
-특정 광고주를 상단에서 선택하면 블로그 화면의 광고주 필터도 해당 광고주로 맞춰집니다.
-새 글을 만들 때는 반드시 실제 광고주 하나를 선택해야 합니다.
+상단 광고주 선택기는 `전체 보기` / 개별 광고주 두 범위를 제공합니다. 특정 광고주를 선택하면 모든 하위 화면(제작·레퍼런스·자산)이 해당 `advertiser_id`로 필터링됩니다.
 
 ## 실행
 
@@ -79,97 +49,32 @@ npm run build
 npm start
 ```
 
-개발:
+개발 서버:
 
 ```bash
 npm run dev
 ```
 
-## 필수 환경변수
+## 환경변수
 
-`.env.example`을 참고합니다.
+`.env.example` 참고. 최소 다음 4개는 **Universe와 반드시 같은 값**이어야 합니다.
 
-- `DATABASE_URL`: Universe와 같은 PostgreSQL
-- `JWT_SECRET`: Universe와 같은 값
-- `HOWTOM_ADMIN_EMAIL`
-- `HOWTOM_ADMIN_PASSWORD`
-- `HOWTOM_ADMIN_NAME`
-- `VITE_UNIVERSE_URL`: Content Studio → Universe 이동 URL
-- `PORT`: Railway가 보통 자동 주입
+- `DATABASE_URL`, `JWT_SECRET`, `HOWTOM_ADMIN_EMAIL`, `HOWTOM_ADMIN_PASSWORD`
 
-Universe에는 `VITE_CONTENT_STUDIO_URL`을 유지합니다.
-
-## API
-
-공통:
-
-- `GET /api/health`
-- `POST /api/login`
-- `GET /api/advertisers`
-
-블로그:
-
-- `GET /api/blog/projects`
-- `POST /api/blog/projects`
-- `GET /api/blog/projects/:id`
-- `PATCH /api/blog/projects/:id`
-- `DELETE /api/blog/projects/:id`
-- `GET /api/blog/styles/:advertiserId`
-- `PUT /api/blog/styles/:advertiserId`
-- `GET /api/blog/assets`
-- `POST /api/blog/assets`
-- `GET /api/blog/ai-status`
-- `POST /api/blog/generate` — 현재 AI 후순위 정책 때문에 비활성
-
-## 데이터 원칙
-
-- 콘텐츠 프로젝트의 Source of Truth는 PostgreSQL입니다.
-- localStorage를 블로그 프로젝트 저장소로 사용하지 않습니다.
-- 기존 외부 블로그 연동 UI의 연결 설정은 현재 브라우저 로컬 설정으로 남아 있으며, 핵심 원고/프로젝트 데이터와는 분리되어 있습니다. 이 연동 설정은 외부 발행 기능을 고도화할 때 서버 저장 방식으로 이전합니다.
-- `.env`, `.git`, `node_modules`, `.data`, `dist`는 Git/배포 소스 ZIP에 포함하지 않습니다.
+나머지(레퍼런스 커넥터, AI)는 비워두면 해당 기능이 "연동 필요"로 정직하게 표시되고, 나머지 기능은 정상 동작합니다.
 
 ## Railway
-
-Content Studio 서비스:
 
 - Build: `npm run build`
 - Start: `node server.mjs`
 - Healthcheck: `/api/health`
 
-`DATABASE_URL`은 기존 Universe가 사용하는 PostgreSQL과 같은 값을 사용합니다.
+## 데이터 원칙
 
-## 이번 단계 완료 조건
+- 모든 프로젝트/레퍼런스 데이터의 Source of Truth는 PostgreSQL입니다. `localStorage`를 업무 데이터 저장소로 쓰지 않습니다.
+- API가 제공하지 않는 값은 `0`이 아니라 `null`로 저장/표시합니다.
+- `.env`, `.git`, `node_modules`, `dist`는 Git/배포 ZIP에 포함하지 않습니다.
 
-- TypeScript 검사 통과
-- 블로그 실제 라우트 `/production/blog` 활성화
-- 다른 PHASE 2 메뉴는 Stub 유지
-- 동일 advertisers / advertiser_id 사용
-- 블로그 CRUD가 PostgreSQL을 사용하도록 구현
-- AI 미연결 상태를 가짜 규칙 기반 생성으로 대체하지 않음
-- Universe 광고 API/Central Metrics 코드는 수정하지 않음
+## 자세한 API 목록, 상태 정의, 우선순위
 
-## 다음 단계
-
-PHASE 2B는 **광고 제작** 하나만 이전합니다.
-그 다음 영상 대본 → 문서 작성 → 제작물 보관함 → 콘텐츠 캘린더 → 템플릿/자산 순서로 진행합니다.
-레퍼런스 수집은 콘텐츠 제작 기능 이전이 안정화된 뒤 별도 PHASE에서 진행합니다.
-
-## PHASE 2A hotfix — 블로그 콘텐츠 캘린더
-- Content Studio 이전 과정에서 누락된 캘린더 전용 CSS를 복구했습니다.
-- 캘린더를 7열 월간 그리드로 정상 표시하고 오늘 날짜를 강조합니다.
-- 이전 달/다음 달 이동과 현재 달 복귀 기능을 추가했습니다.
-- 상단 광고주 선택 범위를 캘린더와 KPI/요약 데이터에 동일하게 적용합니다.
-- 발행 예정일이 있으면 해당 날짜를 우선하고, 없으면 생성일을 사용합니다.
-- 현재 표시 월에 일정이 없을 때 월 단위 빈 상태를 정확히 표시합니다.
-- 모바일에서는 캘린더만 가로 스크롤되어 전체 페이지 레이아웃을 밀어내지 않습니다.
-
-
-## PHASE 2B — 광고 제작 이전
-
-- `/production/ad` 광고 제작을 Stub에서 실제 기능으로 전환했습니다.
-- 광고 제작 프로젝트는 `ad_projects` PostgreSQL 테이블을 Source of Truth로 사용합니다.
-- 전체 광고주/개별 광고주 전역 선택 범위와 프로젝트 목록 필터가 연동됩니다.
-- 브리프, 후킹 3안, 광고 카피 3안, CTA, 이미지/영상 기획을 저장할 수 있습니다.
-- 임시 저장, 상태 변경, 복제, 삭제, 제작 완료를 지원합니다.
-- 레퍼런스·템플릿·제작물 보관함·자산 파일 연결은 해당 기능 이전 후 연결합니다.
-- 광고 카피 AI 생성은 이번 단계에서 추가하지 않았습니다.
+`PRD.md`의 각 기능 섹션과 부록 A(실측 As-Is 현황)를 참고하세요. 새 기능을 AI에게 요청할 때 "PRD.md의 해당 섹션과 Definition of Done을 기준으로 구현"이라고 지정하면 범위가 임의로 커지는 것을 막을 수 있습니다.

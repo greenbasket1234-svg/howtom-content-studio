@@ -1,7 +1,7 @@
 {
   "name": "howtom-content-studio",
   "private": true,
-  "version": "0.2.0-phase2a-blog",
+  "version": "1.0.0",
   "type": "module",
   "engines": {
     "node": ">=20"

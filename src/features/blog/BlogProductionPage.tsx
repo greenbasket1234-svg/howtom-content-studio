@@ -145,7 +145,7 @@ export function BlogProductionPage(){
           {medical&&<label className="medical"><input type="checkbox" checked={project.options.medical} onChange={e=>patchLocal({options:{...project.options,medical:e.target.checked}})}/> 의료광고 사전점검</label>}
         </div>
         <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured}><Sparkles size={16}/> 초안 만들기</button>
-        <small className="blog26-help">{aiStatus?.configured?`외부 AI(${aiStatus.provider})가 초안을 작성합니다.`:'AI 원고 생성은 후속 단계에서 공통 AI Gateway로 연결합니다. 현재는 직접 작성·편집·저장 기능을 사용하세요.'}</small>
+        <small className="blog26-help">{aiStatus?.configured?'제휴 업체 AI가 초안을 작성합니다.':'블로그 AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결됩니다(연동 필요). 현재는 직접 작성·편집·저장 기능을 사용하세요.'}</small>
       </aside>
 
       <main className="blog26-editor card">

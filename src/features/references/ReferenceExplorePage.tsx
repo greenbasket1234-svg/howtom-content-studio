@@ -86,12 +86,14 @@ export function ReferenceExplorePage() {
       {notice && <div className="content-notice">{notice}</div>}
 
       <div className="content-quick-tabs">
-        {(Object.keys(PLATFORM_LABEL) as Platform[]).map(p => <button key={p} className={platform === p ? 'active' : ''} onClick={() => { setPlatform(p); setResults(null); setSearchError(''); }}>{PLATFORM_LABEL[p]}{(p === 'tiktok' || p === 'threads') && ' (준비중)'}</button>)}
+        {(Object.keys(PLATFORM_LABEL) as Platform[]).map(p => <button key={p} className={platform === p ? 'active' : ''} onClick={() => { setPlatform(p); setResults(null); setSearchError(''); }}>{PLATFORM_LABEL[p]}{(p === 'tiktok' || p === 'threads') && ' (연동 필요)'}</button>)}
       </div>
 
       {notYetSupported ? (
         <div className="content-notice" style={{ background: '#f1f5f9', color: 'var(--text-secondary)' }}>
-          {PLATFORM_LABEL[platform]}는 일반 앱이 쓸 수 있는 공개 콘텐츠 검색 API가 아직 없어 지원하지 않습니다. 가짜 데이터를 만들어 보여드리지 않으며, 공식 API가 열리면 지원할 예정입니다.
+          {platform === 'threads'
+            ? 'Threads는 Meta 공식 keyword_search API가 존재하지만, HOWTOM 커넥터가 아직 준비되지 않았습니다(연동 필요). 플랫폼 자체가 불가능한 것은 아닙니다.'
+            : 'TikTok Commercial Content API는 현재 EU 지역 데이터만 제공하고 연구자 승인제로 운영되어, 한국 상업 광고주 대상인 HOWTOM에서 바로 사용하기 어렵습니다(연동 필요, 자격·지역 요건 재확인 필요).'}
         </div>
       ) : connectorStatus && platformConfigured === false && (
         <div className="content-notice" style={{ background: '#fef2f2', color: '#b91c1c' }}>
