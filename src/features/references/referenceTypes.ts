@@ -6,12 +6,16 @@ export type SearchResult = {
   headline: string;
   description: string;
   cta: string;
+  thumbnailUrl?: string | null;
   adSnapshotUrl: string | null;
   startDate: string | null;
   isActive: boolean;
   flightDays: number | null;
   isLongRunning: boolean;
   platforms: string[];
+  // YouTube처럼 공개적으로 조회수·좋아요 수를 제공하는 플랫폼에서만 값이 들어옵니다(Meta는 항상 null).
+  viewCount?: number | null;
+  likeCount?: number | null;
 };
 
 export type SavedReference = {
@@ -25,6 +29,7 @@ export type SavedReference = {
   body: string; headline: string; description: string; cta: string;
   landingUrl: string | null; thumbnailUrl: string | null; adSnapshotUrl: string | null;
   startDate: string | null; isActive: boolean | null; flightDays: number | null;
+  viewCount: number | null; likeCount: number | null;
   tags: string[]; memo: string | null; createdAt: string;
   boards: { boardId: string; boardName: string }[];
 };

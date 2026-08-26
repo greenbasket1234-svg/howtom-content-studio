@@ -337,6 +337,8 @@ async function ensureReferenceTables() {
       start_date DATE,
       is_active BOOLEAN,
       flight_days INTEGER,
+      view_count BIGINT,
+      like_count BIGINT,
       tags TEXT[] NOT NULL DEFAULT '{}',
       memo TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -372,6 +374,8 @@ async function ensureReferenceTables() {
       added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (board_id, reference_id)
     );
+    ALTER TABLE content_references ADD COLUMN IF NOT EXISTS view_count BIGINT;
+    ALTER TABLE content_references ADD COLUMN IF NOT EXISTS like_count BIGINT;
   `);
 }
 
@@ -425,6 +429,55 @@ async function searchMetaAdLibrary({ keyword, pageIds, country = 'KR' }) {
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error?.message || `Meta 광고 라이브러리 API HTTP ${res.status}`);
   return (data.data || []).map(normalizeAdLibraryRow);
+}
+
+/**
+ * YouTube 커넥터 (PHASE 5)
+ * ------------------------------------------------------------
+ * Meta 광고 라이브러리와 달리 YouTube는 "광고 라이브러리" 개념이 없어, 일반 공개
+ * 영상을 검색합니다(경쟁사 채널 리서치·인기 영상 참고용). 조회수·좋아요 수는 YouTube가
+ * 공개적으로 제공하는 값이라 표시해도 되지만, 실제 광고 성과(클릭·전환 등)는 알 수 없으므로
+ * 절대 표시하지 않습니다.
+ */
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+function youtubeConfigured() { return Boolean(YOUTUBE_API_KEY); }
+
+async function searchYoutubeVideos({ keyword, channelId }) {
+  if (!youtubeConfigured()) throw new Error('YouTube 연동이 설정되지 않았습니다. 관리자가 YOUTUBE_API_KEY(YouTube Data API v3)를 등록해야 합니다.');
+  if (!keyword && !channelId) throw new Error('검색어 또는 경쟁 채널을 선택하세요.');
+  const searchParams = new URLSearchParams({ key: YOUTUBE_API_KEY, part: 'snippet', type: 'video', order: 'date', maxResults: '25', regionCode: 'KR', relevanceLanguage: 'ko' });
+  if (keyword) searchParams.set('q', keyword);
+  if (channelId) searchParams.set('channelId', channelId);
+  const searchRes = await fetch(`https://www.googleapis.com/youtube/v3/search?${searchParams.toString()}`);
+  const searchData = await searchRes.json();
+  if (!searchRes.ok) throw new Error(searchData?.error?.message || `YouTube API HTTP ${searchRes.status}`);
+  const videoIds = (searchData.items || []).map(item => item.id?.videoId).filter(Boolean);
+  if (!videoIds.length) return [];
+
+  // 조회수·좋아요 수는 검색 결과에 없어서, videos.list로 한 번 더 조회합니다.
+  const statsParams = new URLSearchParams({ key: YOUTUBE_API_KEY, part: 'statistics,contentDetails', id: videoIds.join(',') });
+  const statsRes = await fetch(`https://www.googleapis.com/youtube/v3/videos?${statsParams.toString()}`);
+  const statsData = await statsRes.json();
+  const statsById = new Map((statsData.items || []).map(item => [item.id, item]));
+
+  return (searchData.items || []).map(item => {
+    const videoId = item.id?.videoId;
+    const stats = statsById.get(videoId);
+    return {
+      externalId: videoId,
+      pageId: item.snippet?.channelId || null,
+      pageName: item.snippet?.channelTitle || '(채널명 없음)',
+      headline: item.snippet?.title || '',
+      description: item.snippet?.description || '',
+      body: '', cta: '',
+      thumbnailUrl: item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.default?.url || null,
+      adSnapshotUrl: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
+      startDate: item.snippet?.publishedAt ? item.snippet.publishedAt.slice(0, 10) : null,
+      isActive: true, flightDays: null, isLongRunning: false, platforms: ['youtube'],
+      viewCount: stats?.statistics?.viewCount ? Number(stats.statistics.viewCount) : null,
+      likeCount: stats?.statistics?.likeCount ? Number(stats.statistics.likeCount) : null,
+    };
+  });
 }
 
 async function ensureBlogTables() {
@@ -798,15 +851,18 @@ const server = http.createServer(async (req, res) => {
         // 실시간 검색 - 저장하지 않고 결과만 보여줍니다.
         if (req.method === 'POST' && pathname === '/api/references/search') {
           const body = await readJson(req);
+          const platform = cleanText(body.platform || 'meta', 20);
           try {
-            const results = await searchMetaAdLibrary({ keyword: cleanText(body.keyword || '', 200), pageIds: Array.isArray(body.pageIds) ? body.pageIds : undefined, country: cleanText(body.country || 'KR', 5) });
+            const results = platform === 'youtube'
+              ? await searchYoutubeVideos({ keyword: cleanText(body.keyword || '', 200), channelId: cleanText(body.channelId || '', 100) || undefined })
+              : await searchMetaAdLibrary({ keyword: cleanText(body.keyword || '', 200), pageIds: Array.isArray(body.pageIds) ? body.pageIds : undefined, country: cleanText(body.country || 'KR', 5) });
             return sendJson(res, 200, { status: 'ok', results });
           } catch (error) {
             return sendJson(res, 200, { status: 'error', error: error instanceof Error ? error.message : String(error) });
           }
         }
         if (req.method === 'GET' && pathname === '/api/references/connector-status') {
-          return sendJson(res, 200, { configured: adLibraryConfigured() });
+          return sendJson(res, 200, { meta: adLibraryConfigured(), youtube: youtubeConfigured() });
         }
         if (req.method === 'GET' && pathname === '/api/references/worker-status') {
           return sendJson(res, 200, { enabled: adLibraryConfigured(), hoursKst: REFERENCE_WORKER_HOURS_KST, lastRunAt: referenceWorkerStatus.lastRunAt, lastResult: referenceWorkerStatus.lastResult });
@@ -827,7 +883,7 @@ const server = http.createServer(async (req, res) => {
             `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
                     r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
                     r.landing_url as "landingUrl", r.thumbnail_url as "thumbnailUrl", r.ad_snapshot_url as "adSnapshotUrl",
-                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.tags, r.memo,
+                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.view_count as "viewCount", r.like_count as "likeCount", r.tags, r.memo,
                     r.created_at as "createdAt",
                     COALESCE(json_agg(json_build_object('boardId', bi.board_id, 'boardName', b.name)) FILTER (WHERE bi.board_id IS NOT NULL), '[]') as boards
              FROM content_references r
@@ -846,15 +902,17 @@ const server = http.createServer(async (req, res) => {
             advertiserUuid = advRes.rows[0]?.id || null;
           }
           const flightDays = Number.isFinite(body.flightDays) ? body.flightDays : null;
+          const viewCount = Number.isFinite(body.viewCount) ? body.viewCount : null;
+          const likeCount = Number.isFinite(body.likeCount) ? body.likeCount : null;
           await pgPool.query(
-            `INSERT INTO content_references (id, tenant_id, advertiser_id, platform, external_id, page_name, is_competitor, body, headline, description, cta, landing_url, thumbnail_url, media_type, ad_snapshot_url, country, start_date, is_active, flight_days, tags, memo)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+            `INSERT INTO content_references (id, tenant_id, advertiser_id, platform, external_id, page_name, is_competitor, body, headline, description, cta, landing_url, thumbnail_url, media_type, ad_snapshot_url, country, start_date, is_active, flight_days, view_count, like_count, tags, memo)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
             [id, tenantId, advertiserUuid, cleanText(body.platform || 'meta', 20), cleanText(body.externalId || '', 120) || null,
              cleanText(body.pageName || '', 200), Boolean(body.isCompetitor), cleanText(body.body || '', 4000), cleanText(body.headline || '', 300),
              cleanText(body.description || '', 1000), cleanText(body.cta || '', 100), cleanText(body.landingUrl || '', 1000) || null,
              cleanText(body.thumbnailUrl || '', 1000) || null, cleanText(body.mediaType || '', 30), cleanText(body.adSnapshotUrl || '', 1000) || null,
              cleanText(body.country || 'KR', 5), body.startDate || null, body.isActive === undefined ? null : Boolean(body.isActive), flightDays,
-             Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 60)).filter(Boolean) : [], cleanText(body.memo || '', 1000) || null]
+             viewCount, likeCount, Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 60)).filter(Boolean) : [], cleanText(body.memo || '', 1000) || null]
           );
           return sendJson(res, 201, { id });
         }
@@ -912,7 +970,7 @@ const server = http.createServer(async (req, res) => {
             `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
                     r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
                     r.landing_url as "landingUrl", r.thumbnail_url as "thumbnailUrl", r.ad_snapshot_url as "adSnapshotUrl",
-                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.tags, r.memo, r.created_at as "createdAt"
+                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.view_count as "viewCount", r.like_count as "likeCount", r.tags, r.memo, r.created_at as "createdAt"
              FROM reference_board_items bi
              JOIN content_references r ON r.id = bi.reference_id
              LEFT JOIN advertisers a ON a.id = r.advertiser_id

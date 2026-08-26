@@ -4,14 +4,14 @@ import { PageHeader } from '../../components/PageHeader';
 import { referencesApi } from './referencesApi';
 
 export function ReferenceSettingsPage() {
-  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<{ meta: boolean; youtube: boolean } | null>(null);
   const [worker, setWorker] = useState<Awaited<ReturnType<typeof referencesApi.workerStatus>> | null>(null);
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState('');
 
   const loadWorker = () => referencesApi.workerStatus().then(setWorker).catch(() => setWorker(null));
   useEffect(() => {
-    referencesApi.connectorStatus().then(s => setConfigured(s.configured)).catch(() => setConfigured(false));
+    referencesApi.connectorStatus().then(setStatus).catch(() => setStatus({ meta: false, youtube: false }));
     loadWorker();
   }, []);
 
@@ -29,26 +29,36 @@ export function ReferenceSettingsPage() {
 
       <section className="cs-card content-section">
         <div className="content-section-head"><h3>플랫폼 연동 상태</h3></div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0' }}>
-          {configured === null ? <span style={{ color: 'var(--text-muted)' }}>확인 중...</span> : configured ? (
-            <><CheckCircle2 size={18} color="#16a34a" /><span><b>Meta 광고 라이브러리</b> — 연결됨</span></>
-          ) : (
-            <><XCircle size={18} color="#dc2626" /><span><b>Meta 광고 라이브러리</b> — 연결되지 않음</span></>
-          )}
-        </div>
-        {configured === false && (
-          <div className="content-notice" style={{ background: '#fef2f2', color: '#b91c1c' }}>
-            관리자가 신원 확인(Identity Confirmation)을 마친 Meta 계정의 토큰을 <code>META_AD_LIBRARY_ACCESS_TOKEN</code> 환경변수로 등록해야 검색·수집이 가능합니다.
-            <br /><a href="https://www.facebook.com/ID" target="_blank" rel="noreferrer" style={{ color: '#b91c1c', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 6 }}>신원 확인 페이지 열기 <ExternalLink size={13} /></a>
-          </div>
+        {status === null ? <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>확인 중...</p> : (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0' }}>
+              {status.meta ? <CheckCircle2 size={18} color="#16a34a" /> : <XCircle size={18} color="#dc2626" />}
+              <span><b>Meta 광고 라이브러리</b> — {status.meta ? '연결됨' : '연결되지 않음'}</span>
+            </div>
+            {!status.meta && (
+              <div className="content-notice" style={{ background: '#fef2f2', color: '#b91c1c', marginBottom: 10 }}>
+                관리자가 신원 확인(Identity Confirmation)을 마친 Meta 계정의 토큰을 <code>META_AD_LIBRARY_ACCESS_TOKEN</code> 환경변수로 등록해야 검색·수집이 가능합니다.
+                <br /><a href="https://www.facebook.com/ID" target="_blank" rel="noreferrer" style={{ color: '#b91c1c', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 6 }}>신원 확인 페이지 열기 <ExternalLink size={13} /></a>
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0' }}>
+              {status.youtube ? <CheckCircle2 size={18} color="#16a34a" /> : <XCircle size={18} color="#dc2626" />}
+              <span><b>YouTube</b> — {status.youtube ? '연결됨' : '연결되지 않음'}</span>
+            </div>
+            {!status.youtube && (
+              <div className="content-notice" style={{ background: '#fef2f2', color: '#b91c1c' }}>
+                관리자가 <code>YOUTUBE_API_KEY</code>(Google Cloud Console에서 발급받은 YouTube Data API v3 키)를 등록해야 검색이 가능합니다.
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', color: 'var(--text-muted)' }}>
+              <XCircle size={18} /><span>Instagram 일반 콘텐츠, TikTok, Threads — 아직 지원되지 않음(추후 지원 예정)</span>
+            </div>
+          </>
         )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', color: 'var(--text-muted)' }}>
-          <XCircle size={18} /><span>Instagram 일반 콘텐츠, YouTube, TikTok, Threads — 아직 지원되지 않음(추후 지원 예정)</span>
-        </div>
       </section>
 
       <section className="cs-card content-section">
-        <div className="content-section-head"><h3>레퍼런스 자동 수집 Worker</h3><button className="cs-btn cs-btn-primary" onClick={runNow} disabled={running || !configured}><PlayCircle size={15} /> {running ? '실행 요청 중...' : '지금 바로 실행'}</button></div>
+        <div className="content-section-head"><h3>레퍼런스 자동 수집 Worker</h3><button className="cs-btn cs-btn-primary" onClick={runNow} disabled={running || !status?.meta}><PlayCircle size={15} /> {running ? '실행 요청 중...' : '지금 바로 실행'}</button></div>
         {notice && <div className="content-notice">{notice}</div>}
         {worker ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
@@ -67,16 +77,16 @@ export function ReferenceSettingsPage() {
             </div>
           </div>
         ) : <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>상태를 불러오는 중입니다...</p>}
-        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '8px 0 0' }}>새로 발견된 경쟁사 광고는 자동으로 레퍼런스에 저장되고, 이미 저장된 광고는 게재 중/종료 상태만 최신으로 갱신됩니다(문구 등 내용은 유지).</p>
+        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '8px 0 0' }}>Meta 경쟁사 광고에만 적용됩니다(신규 발견은 자동 저장, 기존 저장분은 게재 중/종료 상태만 최신으로 갱신). YouTube 경쟁 채널 자동 수집은 아직 지원되지 않습니다.</p>
       </section>
 
       <section className="cs-card content-section">
         <div className="content-section-head"><h3>현재 수집 방식</h3></div>
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13.5, color: 'var(--text-secondary)' }}>
-          <li><b>레퍼런스 탐색</b>에서 키워드를 입력해 검색하면 실시간으로 Meta 광고 라이브러리를 조회합니다. 저장 버튼을 눌러야만 실제로 보관됩니다.</li>
-          <li><b>경쟁사 모니터링</b>에 등록한 브랜드는 위 자동 수집 Worker가 하루 2번 자동으로 수집하며, <b>"지금 수집"</b> 버튼으로 즉시 확인할 수도 있습니다.</li>
-          <li>검색 결과 자체(썸네일·영상 원본)는 서버에 저장하지 않고, 페이지 미리보기 링크(<code>ad_snapshot_url</code>)만 보여줍니다. 저장한 레퍼런스만 필요한 정보(문구·링크 등)를 데이터베이스에 남깁니다.</li>
-          <li>매체 지출·노출 등 성과 데이터는 Meta 광고 라이브러리 API가 제공하지 않아 표시하지 않습니다.</li>
+          <li><b>레퍼런스 탐색</b>에서 Meta 또는 YouTube 탭을 선택해 키워드로 검색하면 실시간으로 조회합니다. 저장 버튼을 눌러야만 실제로 보관됩니다.</li>
+          <li><b>경쟁사 모니터링</b>(Meta)에 등록한 브랜드는 위 자동 수집 Worker가 하루 2번 자동으로 수집하며, <b>"지금 수집"</b> 버튼으로 즉시 확인할 수도 있습니다.</li>
+          <li>검색 결과 자체(영상 원본 파일 등)는 서버에 저장하지 않고, 미리보기 링크나 썸네일 URL만 보여줍니다. 저장한 레퍼런스만 필요한 정보(문구·링크·조회수 등)를 데이터베이스에 남깁니다.</li>
+          <li>Meta 광고의 매체 지출·클릭 등 비공개 성과 데이터는 표시하지 않습니다. YouTube의 조회수·좋아요 수는 공개 정보라 표시합니다.</li>
         </ul>
       </section>
     </div>
