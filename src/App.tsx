@@ -8,6 +8,7 @@ import { LoginPage } from './pages/LoginPage';
 import { StubPage } from './pages/stub/StubPage';
 import { BlogProductionPage } from './features/blog/BlogProductionPage';
 import { AdCreationPage } from './features/ad/AdCreationPage';
+import { TemplatesPage } from './features/templates/TemplatesPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -43,7 +44,7 @@ export default function App() {
 
       <Route path="/library" element={<Stub title="제작물 보관함" phase="PHASE 2" />} />
       <Route path="/calendar" element={<Stub title="콘텐츠 캘린더" phase="PHASE 2" />} />
-      <Route path="/templates" element={<Stub title="템플릿" phase="PHASE 2" />} />
+      <Route path="/templates" element={<RequireAuth><TemplatesPage /></RequireAuth>} />
 
       <Route path="/assets/images" element={<Stub title="이미지 자산" phase="PHASE 2" />} />
       <Route path="/assets/videos" element={<Stub title="영상 자산" phase="PHASE 2" />} />

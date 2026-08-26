@@ -1,0 +1,21 @@
+export type TemplateBlock = { blockId: string; label: string; blockType: 'text' | 'textarea' | 'select' | 'image' | 'metric' | 'section'; defaultValue?: string };
+export type TemplateRule = { field: string; type: 'maxLength' | 'required' | 'recommended'; value: string | number };
+export type TemplateType = 'ad-copy' | 'image-brief' | 'video-script' | 'blog' | 'document';
+export type ContentTemplate = {
+  templateId: string;
+  name: string;
+  templateType: TemplateType;
+  advertiserId: string | null;
+  advertiserName?: string;
+  channel?: string;
+  description?: string;
+  blocks: TemplateBlock[];
+  rules: TemplateRule[];
+  tags: string[];
+  version: number;
+  isFavorite: boolean;
+  useCount: number;
+  parentTemplateId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};

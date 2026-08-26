@@ -170,6 +170,51 @@ async function ensureAdTables() {
   `);
 }
 
+function normalizeTemplate(body = {}, current = null) {
+  const base = current || {};
+  const blocksSource = Array.isArray(body.blocks) ? body.blocks : (Array.isArray(base.blocks) ? base.blocks : []);
+  const blocks = blocksSource.slice(0, 20).map((b, i) => ({
+    blockId: cleanText(b?.blockId || `block-${i + 1}`, 60),
+    label: cleanText(b?.label || `블록 ${i + 1}`, 120),
+    blockType: cleanText(b?.blockType || 'textarea', 30),
+    defaultValue: cleanText(b?.defaultValue || '', 4000),
+  }));
+  const rulesSource = Array.isArray(body.rules) ? body.rules : (Array.isArray(base.rules) ? base.rules : []);
+  const rules = rulesSource.slice(0, 10).map(r => ({ field: cleanText(r?.field || '', 60), type: cleanText(r?.type || 'maxLength', 30), value: typeof r?.value === 'number' ? r.value : cleanText(r?.value || '', 200) }));
+  const tags = Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 60)).filter(Boolean).slice(0, 20) : (base.tags || []);
+  return {
+    ...base,
+    templateId: base.templateId || cleanText(body.templateId || '', 120),
+    name: cleanText(body.name ?? base.name ?? '새 템플릿', 200),
+    templateType: cleanText(body.templateType ?? base.templateType ?? 'ad-copy', 40),
+    advertiserId: cleanText(body.advertiserId ?? base.advertiserId ?? '', 120) || null,
+    advertiserName: cleanText(body.advertiserName ?? base.advertiserName ?? '', 160),
+    channel: cleanText(body.channel ?? base.channel ?? '', 120),
+    description: cleanText(body.description ?? base.description ?? '', 500),
+    blocks, rules, tags,
+    version: Number.isFinite(body.version) ? body.version : (base.version ?? 1),
+    isFavorite: typeof body.isFavorite === 'boolean' ? body.isFavorite : (base.isFavorite ?? false),
+    useCount: Number.isFinite(body.useCount) ? body.useCount : (base.useCount ?? 0),
+    parentTemplateId: cleanText(body.parentTemplateId ?? base.parentTemplateId ?? '', 120) || null,
+  };
+}
+
+async function ensureTemplateTables() {
+  if (!pgPool) return;
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS content_templates (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID REFERENCES advertisers(id) ON DELETE SET NULL,
+      template_type TEXT NOT NULL DEFAULT 'ad-copy',
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_content_templates_tenant ON content_templates(tenant_id);
+  `);
+}
+
 async function ensureBlogTables() {
   if (!pgPool) return;
   await pgPool.query(`
@@ -199,6 +244,7 @@ async function ensureBlogTables() {
 if (pgPool) {
   ensureBlogTables().catch(error => console.error('[Content Studio] blog table check failed:', error?.message || error));
   ensureAdTables().catch(error => console.error('[Content Studio] ad table check failed:', error?.message || error));
+  ensureTemplateTables().catch(error => console.error('[Content Studio] template table check failed:', error?.message || error));
 }
 
 function sendJson(res, status, body) {
@@ -335,6 +381,74 @@ const server = http.createServer(async (req, res) => {
           const id = decodeURIComponent(adProjectMatch[1]);
           await pgPool.query(`DELETE FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
+        }
+      }
+
+      if (pathname.startsWith('/api/templates')) {
+        if (!requireDb(res)) return;
+        const tenantId = await getCurrentTenantId();
+        if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
+
+        if (req.method === 'GET' && pathname === '/api/templates') {
+          const r = await pgPool.query(`SELECT id, data FROM content_templates WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), templateId: row.id })));
+        }
+        if (req.method === 'POST' && pathname === '/api/templates') {
+          const body = await readJson(req);
+          const row = normalizeTemplate(body);
+          row.templateId = makeId('tpl');
+          let advertiserUuid = null;
+          if (row.advertiserId) {
+            const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
+            if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+            advertiserUuid = advRes.rows[0].id; row.advertiserName = advRes.rows[0].name;
+          }
+          await pgPool.query(`INSERT INTO content_templates (id, tenant_id, advertiser_id, template_type, data) VALUES ($1,$2,$3,$4,$5)`, [row.templateId, tenantId, advertiserUuid, row.templateType, JSON.stringify(row)]);
+          return sendJson(res, 201, row);
+        }
+        const templateMatch = pathname.match(/^\/api\/templates\/([^/]+)$/);
+        if (templateMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+          const id = decodeURIComponent(templateMatch[1]);
+          const patch = await readJson(req);
+          const cur = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          const updated = normalizeTemplate(patch, { ...cur.rows[0].data, templateId: id });
+          await pgPool.query(`UPDATE content_templates SET template_type=$3, data=$4, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, updated.templateType, JSON.stringify(updated)]);
+          return sendJson(res, 200, updated);
+        }
+        if (templateMatch && req.method === 'DELETE') {
+          const id = decodeURIComponent(templateMatch[1]);
+          await pgPool.query(`DELETE FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return sendJson(res, 200, { ok: true });
+        }
+        // 템플릿 복제: 이름 뒤에 "복사본"을 붙여 새 템플릿으로 저장합니다.
+        const duplicateMatch = pathname.match(/^\/api\/templates\/([^/]+)\/duplicate$/);
+        if (duplicateMatch && req.method === 'POST') {
+          const id = decodeURIComponent(duplicateMatch[1]);
+          const cur = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          const source = cur.rows[0].data;
+          const row = normalizeTemplate({ ...source, name: `${source.name} 복사본`, useCount: 0, isFavorite: false }, null);
+          row.templateId = makeId('tpl');
+          const advertiserUuid = row.advertiserId ? (await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId])).rows[0]?.id || null : null;
+          await pgPool.query(`INSERT INTO content_templates (id, tenant_id, advertiser_id, template_type, data) VALUES ($1,$2,$3,$4,$5)`, [row.templateId, tenantId, advertiserUuid, row.templateType, JSON.stringify(row)]);
+          return sendJson(res, 201, row);
+        }
+        // 새 버전 만들기: 같은 이름 계열로 버전 번호를 올려 새 템플릿으로 저장합니다.
+        const versionMatch = pathname.match(/^\/api\/templates\/([^/]+)\/new-version$/);
+        if (versionMatch && req.method === 'POST') {
+          const id = decodeURIComponent(versionMatch[1]);
+          const cur = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          const source = cur.rows[0].data;
+          const rootId = source.parentTemplateId || source.templateId;
+          const related = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND (id=$2 OR data->>'parentTemplateId'=$2)`, [tenantId, rootId]);
+          const maxVersion = Math.max(1, ...related.rows.map(r => Number(r.data?.version) || 1));
+          const row = normalizeTemplate({ ...source, version: maxVersion + 1, parentTemplateId: rootId, useCount: 0 }, null);
+          row.templateId = makeId('tpl');
+          const advertiserUuid = row.advertiserId ? (await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId])).rows[0]?.id || null : null;
+          await pgPool.query(`INSERT INTO content_templates (id, tenant_id, advertiser_id, template_type, data) VALUES ($1,$2,$3,$4,$5)`, [row.templateId, tenantId, advertiserUuid, row.templateType, JSON.stringify(row)]);
+          return sendJson(res, 201, row);
         }
       }
 
