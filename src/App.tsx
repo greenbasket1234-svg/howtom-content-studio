@@ -17,6 +17,7 @@ import { AssetsPage } from './features/assets/AssetsPage';
 import { ReferenceExplorePage } from './features/references/ReferenceExplorePage';
 import { CompetitorMonitoringPage } from './features/references/CompetitorMonitoringPage';
 import { ReferenceBoardsPage } from './features/references/ReferenceBoardsPage';
+import { ReferenceSettingsPage } from './features/references/ReferenceSettingsPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -42,7 +43,7 @@ export default function App() {
       <Route path="/references" element={<RequireAuth><ReferenceExplorePage /></RequireAuth>} />
       <Route path="/references/competitors" element={<RequireAuth><CompetitorMonitoringPage /></RequireAuth>} />
       <Route path="/references/boards" element={<RequireAuth><ReferenceBoardsPage /></RequireAuth>} />
-      <Route path="/references/settings" element={<Stub title="수집 설정" phase="PHASE 3" />} />
+      <Route path="/references/settings" element={<RequireAuth><ReferenceSettingsPage /></RequireAuth>} />
 
       <Route path="/production/ad" element={<RequireAuth><AdCreationPage /></RequireAuth>} />
       <Route path="/production/blog" element={<RequireAuth><BlogProductionPage /></RequireAuth>} />
