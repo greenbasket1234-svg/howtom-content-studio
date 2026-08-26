@@ -251,6 +251,50 @@ async function ensureDocumentTables() {
   `);
 }
 
+function normalizeVideoScriptProject(body = {}, current = null) {
+  const base = current || {};
+  const scenesSource = Array.isArray(body.scenes) ? body.scenes : (Array.isArray(base.scenes) ? base.scenes : []);
+  const scenes = scenesSource.slice(0, 40).map((s, i) => ({
+    sceneId: cleanText(s?.sceneId || `scene-${i + 1}`, 60),
+    order: Number.isFinite(s?.order) ? s.order : i + 1,
+    startSecond: Number.isFinite(s?.startSecond) ? s.startSecond : 0,
+    endSecond: Number.isFinite(s?.endSecond) ? s.endSecond : 0,
+    purpose: cleanText(s?.purpose || 'other', 20),
+    visual: cleanText(s?.visual || '', 500),
+    narration: cleanText(s?.narration || '', 1000),
+    caption: cleanText(s?.caption || '', 500),
+  }));
+  return {
+    ...base,
+    projectId: base.projectId || cleanText(body.projectId || '', 120),
+    title: cleanText(body.title ?? base.title ?? '새 영상 대본', 240),
+    advertiserId: cleanText(body.advertiserId ?? base.advertiserId ?? '', 120),
+    advertiserName: cleanText(body.advertiserName ?? base.advertiserName ?? '', 160),
+    videoType: cleanText(body.videoType ?? base.videoType ?? '숏폼 광고', 60),
+    targetSeconds: Number.isFinite(body.targetSeconds) ? body.targetSeconds : (base.targetSeconds ?? 30),
+    ratio: cleanText(body.ratio ?? base.ratio ?? '9:16', 20),
+    keyMessage: cleanText(body.keyMessage ?? base.keyMessage ?? '', 500),
+    cta: cleanText(body.cta ?? base.cta ?? '', 120),
+    scenes,
+    status: cleanText(body.status ?? base.status ?? 'draft', 40),
+  };
+}
+
+async function ensureVideoScriptTables() {
+  if (!pgPool) return;
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS video_script_projects (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID REFERENCES advertisers(id) ON DELETE SET NULL,
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_video_script_projects_tenant ON video_script_projects(tenant_id);
+  `);
+}
+
 async function ensureBlogTables() {
   if (!pgPool) return;
   await pgPool.query(`
@@ -282,6 +326,7 @@ if (pgPool) {
   ensureAdTables().catch(error => console.error('[Content Studio] ad table check failed:', error?.message || error));
   ensureTemplateTables().catch(error => console.error('[Content Studio] template table check failed:', error?.message || error));
   ensureDocumentTables().catch(error => console.error('[Content Studio] document table check failed:', error?.message || error));
+  ensureVideoScriptTables().catch(error => console.error('[Content Studio] video script table check failed:', error?.message || error));
 }
 
 function sendJson(res, status, body) {
@@ -528,6 +573,49 @@ const server = http.createServer(async (req, res) => {
         if (docMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(docMatch[1]);
           await pgPool.query(`DELETE FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return sendJson(res, 200, { ok: true });
+        }
+      }
+
+      if (pathname.startsWith('/api/video-scripts')) {
+        if (!requireDb(res)) return;
+        const tenantId = await getCurrentTenantId();
+        if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
+
+        if (req.method === 'GET' && pathname === '/api/video-scripts') {
+          const r = await pgPool.query(`SELECT id, data FROM video_script_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
+        }
+        if (req.method === 'POST' && pathname === '/api/video-scripts') {
+          const body = await readJson(req);
+          const row = normalizeVideoScriptProject(body);
+          row.projectId = makeId('vs');
+          if (!row.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
+          if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+          row.advertiserName = advRes.rows[0].name;
+          await pgPool.query(`INSERT INTO video_script_projects (id, tenant_id, advertiser_id, data) VALUES ($1,$2,$3,$4)`, [row.projectId, tenantId, advRes.rows[0].id, JSON.stringify(row)]);
+          return sendJson(res, 201, row);
+        }
+        const vsMatch = pathname.match(/^\/api\/video-scripts\/([^/]+)$/);
+        if (vsMatch && req.method === 'GET') {
+          const id = decodeURIComponent(vsMatch[1]);
+          const r = await pgPool.query(`SELECT id, data FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return r.rows[0] ? sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id }) : sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
+        }
+        if (vsMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+          const id = decodeURIComponent(vsMatch[1]);
+          const patch = await readJson(req);
+          const cur = await pgPool.query(`SELECT data FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const current = cur.rows[0]?.data;
+          if (!current) return sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
+          const updated = normalizeVideoScriptProject(patch, { ...current, projectId: id });
+          await pgPool.query(`UPDATE video_script_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
+          return sendJson(res, 200, updated);
+        }
+        if (vsMatch && req.method === 'DELETE') {
+          const id = decodeURIComponent(vsMatch[1]);
+          await pgPool.query(`DELETE FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
       }
