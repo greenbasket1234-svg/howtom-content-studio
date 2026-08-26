@@ -480,6 +480,45 @@ async function searchYoutubeVideos({ keyword, channelId }) {
   });
 }
 
+/**
+ * Instagram 일반 콘텐츠 (PHASE 6) — 해시태그 검색
+ * ------------------------------------------------------------
+ * Instagram Graph API의 공식 해시태그 검색만 사용합니다(비공식 스크래핑 없음).
+ * 이 API는 특성상 "내가 연결한 비즈니스 계정을 대신해서" 검색하는 구조라 매번
+ * ig_business_account_id가 필요하고, 그 계정 기준으로 주당 30개 해시태그까지만
+ * 검색할 수 있습니다(Meta의 API 제약, HOWTOM이 만든 제약이 아닙니다).
+ */
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || '';
+function instagramConfigured() { return Boolean(META_ACCESS_TOKEN); }
+
+async function searchInstagramHashtag({ hashtag, igBusinessAccountId }) {
+  if (!instagramConfigured()) throw new Error('Instagram 연동이 설정되지 않았습니다. 관리자가 META_ACCESS_TOKEN을 등록해야 합니다.');
+  if (!hashtag) throw new Error('검색할 해시태그를 입력하세요.');
+  if (!igBusinessAccountId) throw new Error('Instagram 비즈니스 계정 ID를 입력하세요. (설정 > 매체 계정 연동에서 연결한 Instagram 계정 ID)');
+  const clean = hashtag.replace(/^#/, '');
+
+  const hashtagRes = await fetch(`https://graph.facebook.com/v21.0/ig_hashtag_search?user_id=${igBusinessAccountId}&q=${encodeURIComponent(clean)}&access_token=${META_ACCESS_TOKEN}`);
+  const hashtagData = await hashtagRes.json();
+  if (!hashtagRes.ok) throw new Error(hashtagData?.error?.message || `Instagram 해시태그 검색 API HTTP ${hashtagRes.status}`);
+  const hashtagId = hashtagData?.data?.[0]?.id;
+  if (!hashtagId) return [];
+
+  const fields = 'id,caption,media_type,media_url,permalink,thumbnail_url,like_count,comments_count,timestamp';
+  const mediaRes = await fetch(`https://graph.facebook.com/v21.0/${hashtagId}/top_media?user_id=${igBusinessAccountId}&fields=${fields}&access_token=${META_ACCESS_TOKEN}`);
+  const mediaData = await mediaRes.json();
+  if (!mediaRes.ok) throw new Error(mediaData?.error?.message || `Instagram 미디어 조회 API HTTP ${mediaRes.status}`);
+
+  return (mediaData.data || []).map(item => ({
+    externalId: item.id, pageId: null, pageName: `#${clean}`,
+    headline: '', description: item.caption || '', body: item.caption || '', cta: '',
+    thumbnailUrl: item.media_type === 'VIDEO' ? (item.thumbnail_url || null) : (item.media_url || null),
+    adSnapshotUrl: item.permalink || null,
+    startDate: item.timestamp ? item.timestamp.slice(0, 10) : null,
+    isActive: true, flightDays: null, isLongRunning: false, platforms: ['instagram'],
+    viewCount: null, likeCount: item.like_count ?? null,
+  }));
+}
+
 async function ensureBlogTables() {
   if (!pgPool) return;
   await pgPool.query(`
@@ -852,9 +891,14 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && pathname === '/api/references/search') {
           const body = await readJson(req);
           const platform = cleanText(body.platform || 'meta', 20);
+          if (platform === 'tiktok' || platform === 'threads') {
+            return sendJson(res, 200, { status: 'error', error: `${platform === 'tiktok' ? 'TikTok' : 'Threads'}는 일반 앱이 쓸 수 있는 공개 콘텐츠 검색 API가 아직 없어 지원하지 않습니다(가짜 데이터를 만들지 않습니다).` });
+          }
           try {
             const results = platform === 'youtube'
               ? await searchYoutubeVideos({ keyword: cleanText(body.keyword || '', 200), channelId: cleanText(body.channelId || '', 100) || undefined })
+              : platform === 'instagram'
+              ? await searchInstagramHashtag({ hashtag: cleanText(body.keyword || '', 100), igBusinessAccountId: cleanText(body.igBusinessAccountId || '', 60) })
               : await searchMetaAdLibrary({ keyword: cleanText(body.keyword || '', 200), pageIds: Array.isArray(body.pageIds) ? body.pageIds : undefined, country: cleanText(body.country || 'KR', 5) });
             return sendJson(res, 200, { status: 'ok', results });
           } catch (error) {
@@ -862,7 +906,7 @@ const server = http.createServer(async (req, res) => {
           }
         }
         if (req.method === 'GET' && pathname === '/api/references/connector-status') {
-          return sendJson(res, 200, { meta: adLibraryConfigured(), youtube: youtubeConfigured() });
+          return sendJson(res, 200, { meta: adLibraryConfigured(), youtube: youtubeConfigured(), instagram: instagramConfigured(), tiktok: false, threads: false });
         }
         if (req.method === 'GET' && pathname === '/api/references/worker-status') {
           return sendJson(res, 200, { enabled: adLibraryConfigured(), hoursKst: REFERENCE_WORKER_HOURS_KST, lastRunAt: referenceWorkerStatus.lastRunAt, lastResult: referenceWorkerStatus.lastResult });

@@ -7,14 +7,16 @@ import { referencesApi } from './referencesApi';
 import type { ReferenceBoard, SavedReference, SearchResult } from './referenceTypes';
 
 const fmt = (v?: string | null) => { if (!v) return '-'; const d = new Date(v); return Number.isNaN(d.getTime()) ? '-' : `${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}.`; };
-type Platform = 'meta' | 'youtube';
+type Platform = 'meta' | 'youtube' | 'instagram' | 'tiktok' | 'threads';
+const PLATFORM_LABEL: Record<Platform, string> = { meta: 'Meta 광고', youtube: 'YouTube 영상', instagram: 'Instagram', tiktok: 'TikTok', threads: 'Threads' };
 
 export function ReferenceExplorePage() {
   const navigate = useNavigate();
   const { advertisers, selectedId } = useAdvertiserContext();
-  const [connectorStatus, setConnectorStatus] = useState<{ meta: boolean; youtube: boolean } | null>(null);
+  const [connectorStatus, setConnectorStatus] = useState<{ meta: boolean; youtube: boolean; instagram: boolean; tiktok: boolean; threads: boolean } | null>(null);
   const [platform, setPlatform] = useState<Platform>('meta');
   const [keyword, setKeyword] = useState('');
+  const [igBusinessAccountId, setIgBusinessAccountId] = useState('');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<SearchResult[] | null>(null);
   const [searchError, setSearchError] = useState('');
@@ -23,16 +25,18 @@ export function ReferenceExplorePage() {
   const [boardPickerFor, setBoardPickerFor] = useState('');
   const [notice, setNotice] = useState('');
 
-  useEffect(() => { referencesApi.connectorStatus().then(setConnectorStatus).catch(() => setConnectorStatus({ meta: false, youtube: false })); }, []);
+  useEffect(() => { referencesApi.connectorStatus().then(setConnectorStatus).catch(() => setConnectorStatus({ meta: false, youtube: false, instagram: false, tiktok: false, threads: false })); }, []);
   const loadSaved = () => { referencesApi.list(selectedId || undefined).then(setSaved).catch(() => setSaved([])); };
   useEffect(() => { loadSaved(); referencesApi.boards().then(setBoards).catch(() => setBoards([])); }, [selectedId]);
-  const platformConfigured = platform === 'meta' ? connectorStatus?.meta : connectorStatus?.youtube;
+  const platformConfigured = connectorStatus?.[platform];
+  const notYetSupported = platform === 'tiktok' || platform === 'threads';
 
   const runSearch = async () => {
     if (!keyword.trim()) { setSearchError('검색어를 입력하세요.'); return; }
+    if (platform === 'instagram' && !igBusinessAccountId.trim()) { setSearchError('Instagram 비즈니스 계정 ID를 입력하세요.'); return; }
     setSearching(true); setSearchError(''); setResults(null);
     try {
-      const res = await referencesApi.search({ platform, keyword: keyword.trim() });
+      const res = await referencesApi.search({ platform, keyword: keyword.trim(), igBusinessAccountId: igBusinessAccountId.trim() || undefined });
       if (res.status === 'error') setSearchError(res.error || '검색에 실패했습니다.');
       else setResults(res.results || []);
     } catch (e) { setSearchError(e instanceof Error ? e.message : '검색에 실패했습니다.'); }
@@ -69,26 +73,32 @@ export function ReferenceExplorePage() {
 
   return (
     <div className="content-system-page">
-      <PageHeader title="레퍼런스 탐색" description="Meta 광고 라이브러리, YouTube 영상에서 참고할 콘텐츠를 검색하고 저장합니다." />
+      <PageHeader title="레퍼런스 탐색" description="Meta 광고, YouTube 영상, Instagram 콘텐츠에서 참고할 자료를 검색하고 저장합니다." />
       {notice && <div className="content-notice">{notice}</div>}
 
       <div className="content-quick-tabs">
-        <button className={platform === 'meta' ? 'active' : ''} onClick={() => { setPlatform('meta'); setResults(null); }}>Meta 광고</button>
-        <button className={platform === 'youtube' ? 'active' : ''} onClick={() => { setPlatform('youtube'); setResults(null); }}>YouTube 영상</button>
+        {(Object.keys(PLATFORM_LABEL) as Platform[]).map(p => <button key={p} className={platform === p ? 'active' : ''} onClick={() => { setPlatform(p); setResults(null); setSearchError(''); }}>{PLATFORM_LABEL[p]}{(p === 'tiktok' || p === 'threads') && ' (준비중)'}</button>)}
       </div>
 
-      {connectorStatus && platformConfigured === false && (
+      {notYetSupported ? (
+        <div className="content-notice" style={{ background: '#f1f5f9', color: 'var(--text-secondary)' }}>
+          {PLATFORM_LABEL[platform]}는 일반 앱이 쓸 수 있는 공개 콘텐츠 검색 API가 아직 없어 지원하지 않습니다. 가짜 데이터를 만들어 보여드리지 않으며, 공식 API가 열리면 지원할 예정입니다.
+        </div>
+      ) : connectorStatus && platformConfigured === false && (
         <div className="content-notice" style={{ background: '#fef2f2', color: '#b91c1c' }}>
-          {platform === 'meta'
-            ? <>Meta 광고 라이브러리 연동이 아직 설정되지 않았습니다. 관리자가 신원 확인을 마친 계정의 <code>META_AD_LIBRARY_ACCESS_TOKEN</code>을 등록해야 검색이 가능합니다.</>
-            : <>YouTube 연동이 아직 설정되지 않았습니다. 관리자가 <code>YOUTUBE_API_KEY</code>(YouTube Data API v3)를 등록해야 검색이 가능합니다.</>}
+          {platform === 'meta' && <>Meta 광고 라이브러리 연동이 아직 설정되지 않았습니다. 관리자가 신원 확인을 마친 계정의 <code>META_AD_LIBRARY_ACCESS_TOKEN</code>을 등록해야 검색이 가능합니다.</>}
+          {platform === 'youtube' && <>YouTube 연동이 아직 설정되지 않았습니다. 관리자가 <code>YOUTUBE_API_KEY</code>(YouTube Data API v3)를 등록해야 검색이 가능합니다.</>}
+          {platform === 'instagram' && <>Instagram 연동이 아직 설정되지 않았습니다. 관리자가 <code>META_ACCESS_TOKEN</code>을 등록해야 검색이 가능합니다.</>}
         </div>
       )}
 
-      <section className="cs-card content-toolbar">
-        <div className="content-search" style={{ flex: 1 }}><Search size={16} /><input value={keyword} onChange={e => setKeyword(e.target.value)} onKeyDown={e => e.key === 'Enter' && runSearch()} placeholder={platform === 'meta' ? '검색할 키워드 (예: 다이어트 보조제)' : '검색할 키워드 (예: 다이어트 보조제 후기)'} /></div>
-        <button className="cs-btn cs-btn-primary" onClick={runSearch} disabled={searching || platformConfigured === false}>{searching ? '검색 중...' : '검색'}</button>
-      </section>
+      {!notYetSupported && (
+        <section className="cs-card content-toolbar">
+          <div className="content-search" style={{ flex: 1 }}><Search size={16} /><input value={keyword} onChange={e => setKeyword(e.target.value)} onKeyDown={e => e.key === 'Enter' && runSearch()} placeholder={platform === 'instagram' ? '검색할 해시태그 (예: 다이어트보조제)' : '검색할 키워드 (예: 다이어트 보조제)'} /></div>
+          {platform === 'instagram' && <input value={igBusinessAccountId} onChange={e => setIgBusinessAccountId(e.target.value)} placeholder="IG 비즈니스 계정 ID" style={{ width: 180, border: '1px solid var(--border)', borderRadius: 9, padding: '9px 12px' }} />}
+          <button className="cs-btn cs-btn-primary" onClick={runSearch} disabled={searching || platformConfigured === false}>{searching ? '검색 중...' : '검색'}</button>
+        </section>
+      )}
       {searchError && <div className="content-notice" style={{ background: '#fef2f2', color: '#b91c1c' }}>{searchError}</div>}
 
       {results && (
@@ -112,6 +122,8 @@ export function ReferenceExplorePage() {
                   <small style={{ color: 'var(--text-muted)' }}>
                     {platform === 'youtube'
                       ? <>{r.startDate ? `게시일 ${fmt(r.startDate)}` : ''}{r.viewCount !== null && r.viewCount !== undefined ? ` · 조회수 ${r.viewCount.toLocaleString()}` : ''}{r.likeCount !== null && r.likeCount !== undefined ? ` · 좋아요 ${r.likeCount.toLocaleString()}` : ''}</>
+                      : platform === 'instagram'
+                      ? <>{r.startDate ? `게시일 ${fmt(r.startDate)}` : ''}{r.likeCount !== null && r.likeCount !== undefined ? ` · 좋아요 ${r.likeCount.toLocaleString()}` : ''}</>
                       : <>{r.startDate ? `시작일 ${fmt(r.startDate)}` : ''} {r.isActive ? '· 게재 중' : '· 종료됨'}{r.flightDays !== null ? ` · ${r.flightDays}일 게재` : ''}</>}
                   </small>
                   <div className="content-card-actions">

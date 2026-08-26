@@ -2,8 +2,8 @@ import { apiFetch } from '../../context/AuthContext';
 import type { Competitor, ReferenceBoard, SavedReference, SearchResult } from './referenceTypes';
 
 export const referencesApi = {
-  connectorStatus: () => apiFetch<{ meta: boolean; youtube: boolean }>('/api/references/connector-status'),
-  search: (body: { platform?: 'meta' | 'youtube'; keyword?: string; pageIds?: string[]; channelId?: string; country?: string }) => apiFetch<{ status: 'ok' | 'error'; results?: SearchResult[]; error?: string }>('/api/references/search', { method: 'POST', body: JSON.stringify(body) }),
+  connectorStatus: () => apiFetch<{ meta: boolean; youtube: boolean; instagram: boolean; tiktok: boolean; threads: boolean }>('/api/references/connector-status'),
+  search: (body: { platform?: 'meta' | 'youtube' | 'instagram' | 'tiktok' | 'threads'; keyword?: string; pageIds?: string[]; channelId?: string; igBusinessAccountId?: string; country?: string }) => apiFetch<{ status: 'ok' | 'error'; results?: SearchResult[]; error?: string }>('/api/references/search', { method: 'POST', body: JSON.stringify(body) }),
   list: (advertiserId?: string) => apiFetch<SavedReference[]>(`/api/references${advertiserId ? `?advertiserId=${advertiserId}` : ''}`),
   save: (body: Partial<SavedReference>) => apiFetch<{ id: string }>('/api/references', { method: 'POST', body: JSON.stringify(body) }),
   patch: (id: string, body: { memo?: string; tags?: string[] }) => apiFetch<{ ok: boolean }>(`/api/references/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),

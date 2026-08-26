@@ -4,14 +4,14 @@ import { PageHeader } from '../../components/PageHeader';
 import { referencesApi } from './referencesApi';
 
 export function ReferenceSettingsPage() {
-  const [status, setStatus] = useState<{ meta: boolean; youtube: boolean } | null>(null);
+  const [status, setStatus] = useState<{ meta: boolean; youtube: boolean; instagram: boolean; tiktok: boolean; threads: boolean } | null>(null);
   const [worker, setWorker] = useState<Awaited<ReturnType<typeof referencesApi.workerStatus>> | null>(null);
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState('');
 
   const loadWorker = () => referencesApi.workerStatus().then(setWorker).catch(() => setWorker(null));
   useEffect(() => {
-    referencesApi.connectorStatus().then(setStatus).catch(() => setStatus({ meta: false, youtube: false }));
+    referencesApi.connectorStatus().then(setStatus).catch(() => setStatus({ meta: false, youtube: false, instagram: false, tiktok: false, threads: false }));
     loadWorker();
   }, []);
 
@@ -50,8 +50,17 @@ export function ReferenceSettingsPage() {
                 관리자가 <code>YOUTUBE_API_KEY</code>(Google Cloud Console에서 발급받은 YouTube Data API v3 키)를 등록해야 검색이 가능합니다.
               </div>
             )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0' }}>
+              {status.instagram ? <CheckCircle2 size={18} color="#16a34a" /> : <XCircle size={18} color="#dc2626" />}
+              <span><b>Instagram</b> — {status.instagram ? '연결됨' : '연결되지 않음'} (해시태그 검색)</span>
+            </div>
+            {!status.instagram && (
+              <div className="content-notice" style={{ background: '#fef2f2', color: '#b91c1c', marginBottom: 10 }}>
+                관리자가 <code>META_ACCESS_TOKEN</code>을 등록해야 검색이 가능합니다. 검색할 때마다 연결된 Instagram 비즈니스 계정 ID가 필요하며, 계정당 주 30개 해시태그까지만 검색할 수 있습니다(Meta의 API 제약).
+              </div>
+            )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', color: 'var(--text-muted)' }}>
-              <XCircle size={18} /><span>Instagram 일반 콘텐츠, TikTok, Threads — 아직 지원되지 않음(추후 지원 예정)</span>
+              <XCircle size={18} /><span><b>TikTok, Threads</b> — 일반 앱이 쓸 수 있는 공개 콘텐츠 검색 API가 아직 없어 지원하지 않습니다(추후 공식 API가 열리면 지원 예정)</span>
             </div>
           </>
         )}
