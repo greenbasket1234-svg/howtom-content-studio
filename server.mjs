@@ -808,6 +808,14 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'GET' && pathname === '/api/references/connector-status') {
           return sendJson(res, 200, { configured: adLibraryConfigured() });
         }
+        if (req.method === 'GET' && pathname === '/api/references/worker-status') {
+          return sendJson(res, 200, { enabled: adLibraryConfigured(), hoursKst: REFERENCE_WORKER_HOURS_KST, lastRunAt: referenceWorkerStatus.lastRunAt, lastResult: referenceWorkerStatus.lastResult });
+        }
+        if (req.method === 'POST' && pathname === '/api/references/worker-run-now') {
+          // 사용자가 "지금 바로 실행" 버튼을 눌렀을 때 씁니다. 응답은 바로 보내고, 실제 수집은 뒤에서 계속 진행합니다.
+          runReferenceWorkerCycle().catch(error => console.error('[레퍼런스 수집 Worker] 수동 실행 오류:', error?.message || error));
+          return sendJson(res, 200, { ok: true, message: '수집을 시작했습니다. 완료까지 몇 분 정도 걸릴 수 있습니다.' });
+        }
 
         // 저장된 레퍼런스 목록/저장/삭제
         if (req.method === 'GET' && pathname === '/api/references') {
@@ -1045,6 +1053,75 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 500, { error: error instanceof Error ? error.message : '서버 오류가 발생했습니다.' });
   }
 });
+
+// ============================================================
+// 레퍼런스 자동 수집 Worker (PHASE 4)
+// ------------------------------------------------------------
+// 별도 서비스로 분리하지 않고, 유니버스의 자동 동기화와 같은 방식으로 이 서버 프로세스
+// 안에서 정해진 시간마다 실행합니다. 수집이 느리거나 하나 실패해도 웹 화면 응답에는
+// 영향을 주지 않도록, 흐름을 절대 막지 않고(non-blocking) 에러를 전부 잡아서 넘어갑니다.
+// ============================================================
+let referenceWorkerStatus = { lastRunAt: null, lastResult: null };
+
+/** 등록된 경쟁 브랜드를 전부 순회하며, 새 광고는 저장하고 기존 광고는 게재 상태를 갱신합니다. */
+async function runReferenceWorkerCycle() {
+  if (!pgPool || !adLibraryConfigured()) {
+    console.log('[레퍼런스 수집 Worker] DB 또는 Meta 광고 라이브러리 연동이 없어 건너뜁니다.');
+    return;
+  }
+  const competitors = await pgPool.query(`SELECT id, tenant_id, advertiser_id::text as advertiser_id, brand_name, page_name FROM reference_competitors`);
+  console.log(`[레퍼런스 수집 Worker] 시작 - 경쟁 브랜드 ${competitors.rows.length}개`);
+  let newCount = 0, updatedCount = 0, failedCount = 0;
+  for (const c of competitors.rows) {
+    try {
+      const results = await searchMetaAdLibrary({ keyword: c.page_name || c.brand_name });
+      for (const r of results) {
+        const existing = await pgPool.query(`SELECT id FROM content_references WHERE tenant_id=$1 AND platform='meta' AND external_id=$2`, [c.tenant_id, r.externalId]);
+        if (existing.rows[0]) {
+          // 이미 저장된 광고면 게재 상태(운영 중/종료, 게재일수)만 최신으로 갱신합니다. 문구 등 나머지 내용은 사용자가 저장한 그대로 둡니다.
+          await pgPool.query(`UPDATE content_references SET is_active=$3, flight_days=$4, updated_at=now() WHERE id=$1 AND tenant_id=$2`, [existing.rows[0].id, c.tenant_id, r.isActive, r.flightDays]);
+          updatedCount++;
+        } else {
+          // 새로 발견된 경쟁사 광고는 자동으로 레퍼런스로 저장합니다.
+          const id = makeId('ref');
+          await pgPool.query(
+            `INSERT INTO content_references (id, tenant_id, advertiser_id, platform, external_id, page_name, is_competitor, body, headline, description, cta, ad_snapshot_url, start_date, is_active, flight_days)
+             VALUES ($1,$2,$3,'meta',$4,$5,true,$6,$7,$8,$9,$10,$11,$12,$13)`,
+            [id, c.tenant_id, c.advertiser_id, r.externalId, r.pageName, r.body, r.headline, r.description, r.cta, r.adSnapshotUrl, r.startDate, r.isActive, r.flightDays]
+          );
+          newCount++;
+        }
+      }
+    } catch (error) {
+      failedCount++;
+      console.error(`[레퍼런스 수집 Worker 실패] ${c.brand_name}:`, error?.message || error);
+    }
+    // Meta API 요청이 한꺼번에 몰리지 않도록 브랜드 사이에 약간의 간격을 둡니다.
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`[레퍼런스 수집 Worker] 완료 - 신규 ${newCount}건, 갱신 ${updatedCount}건, 실패 ${failedCount}개 브랜드`);
+  referenceWorkerStatus = { lastRunAt: new Date().toISOString(), lastResult: { competitors: competitors.rows.length, newCount, updatedCount, failedCount } };
+}
+
+/** 하루 2번(한국시간 08시, 20시)에 레퍼런스 자동 수집을 실행합니다. 광고 라이브러리는 하루 단위로
+ * 갱신되는 데이터라 성과 동기화만큼 자주 돌 필요는 없습니다. */
+const REFERENCE_WORKER_HOURS_KST = [8, 20];
+let lastReferenceWorkerKey = '';
+function scheduleReferenceWorker() {
+  setInterval(() => {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Seoul', hour: 'numeric', minute: 'numeric', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+    const get = (type) => parts.find(p => p.type === type)?.value;
+    const hour = Number(get('hour')); const minute = Number(get('minute'));
+    const dateKey = `${get('year')}-${get('month')}-${get('day')}-${hour}`;
+    if (minute === 0 && REFERENCE_WORKER_HOURS_KST.includes(hour) && lastReferenceWorkerKey !== dateKey) {
+      lastReferenceWorkerKey = dateKey;
+      console.log(`[레퍼런스 수집 Worker] 예약 시각 도달: 한국시간 ${hour}시`);
+      runReferenceWorkerCycle().catch(error => console.error('[레퍼런스 수집 Worker] 처리되지 않은 오류:', error?.message || error));
+    }
+  }, 60_000);
+  console.log(`[레퍼런스 수집 Worker] 스케줄러 시작 - 매일 한국시간 ${REFERENCE_WORKER_HOURS_KST.join(', ')}시에 자동 실행됩니다.`);
+}
+if (pgPool) scheduleReferenceWorker();
 
 server.listen(PORT, '0.0.0.0', () => console.log(`[HOWTOM Content Studio] PHASE 2B blog+ad server listening on :${PORT}`));
 process.on('SIGTERM', async () => { try { await pgPool?.end(); } catch {} server.close(() => process.exit(0)); });

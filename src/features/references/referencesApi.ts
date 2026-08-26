@@ -20,4 +20,7 @@ export const referencesApi = {
   competitors: (advertiserId?: string) => apiFetch<Competitor[]>(`/api/reference-competitors${advertiserId ? `?advertiserId=${advertiserId}` : ''}`),
   addCompetitor: (body: { advertiserId: string; brandName: string; pageName?: string }) => apiFetch<{ id: string; brandName: string }>('/api/reference-competitors', { method: 'POST', body: JSON.stringify(body) }),
   removeCompetitor: (id: string) => apiFetch<{ ok: boolean }>(`/api/reference-competitors/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  workerStatus: () => apiFetch<{ enabled: boolean; hoursKst: number[]; lastRunAt: string | null; lastResult: { competitors: number; newCount: number; updatedCount: number; failedCount: number } | null }>('/api/references/worker-status'),
+  runWorkerNow: () => apiFetch<{ ok: boolean; message: string }>('/api/references/worker-run-now', { method: 'POST' }),
 };
