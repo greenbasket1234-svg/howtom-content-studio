@@ -1,0 +1,21 @@
+import { apiFetch } from '../../context/AuthContext';
+import type { Competitor, ReferenceBoard, SavedReference, SearchResult } from './referenceTypes';
+
+export const referencesApi = {
+  connectorStatus: () => apiFetch<{ configured: boolean }>('/api/references/connector-status'),
+  search: (body: { keyword?: string; pageIds?: string[]; country?: string }) => apiFetch<{ status: 'ok' | 'error'; results?: SearchResult[]; error?: string }>('/api/references/search', { method: 'POST', body: JSON.stringify(body) }),
+  list: (advertiserId?: string) => apiFetch<SavedReference[]>(`/api/references${advertiserId ? `?advertiserId=${advertiserId}` : ''}`),
+  save: (body: Partial<SavedReference>) => apiFetch<{ id: string }>('/api/references', { method: 'POST', body: JSON.stringify(body) }),
+  patch: (id: string, body: { memo?: string; tags?: string[] }) => apiFetch<{ ok: boolean }>(`/api/references/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  remove: (id: string) => apiFetch<{ ok: boolean }>(`/api/references/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  boards: () => apiFetch<ReferenceBoard[]>('/api/reference-boards'),
+  createBoard: (name: string, advertiserId?: string) => apiFetch<{ id: string; name: string }>('/api/reference-boards', { method: 'POST', body: JSON.stringify({ name, advertiserId }) }),
+  deleteBoard: (id: string) => apiFetch<{ ok: boolean }>(`/api/reference-boards/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  addToBoard: (boardId: string, referenceId: string) => apiFetch<{ ok: boolean }>(`/api/reference-boards/${encodeURIComponent(boardId)}/items`, { method: 'POST', body: JSON.stringify({ referenceId }) }),
+  removeFromBoard: (boardId: string, referenceId: string) => apiFetch<{ ok: boolean }>(`/api/reference-boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(referenceId)}`, { method: 'DELETE' }),
+
+  competitors: (advertiserId?: string) => apiFetch<Competitor[]>(`/api/reference-competitors${advertiserId ? `?advertiserId=${advertiserId}` : ''}`),
+  addCompetitor: (body: { advertiserId: string; brandName: string; pageName?: string }) => apiFetch<{ id: string; brandName: string }>('/api/reference-competitors', { method: 'POST', body: JSON.stringify(body) }),
+  removeCompetitor: (id: string) => apiFetch<{ ok: boolean }>(`/api/reference-competitors/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+};

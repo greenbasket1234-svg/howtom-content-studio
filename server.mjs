@@ -313,6 +313,120 @@ async function ensureAssetTables() {
   `);
 }
 
+async function ensureReferenceTables() {
+  if (!pgPool) return;
+  await pgPool.query(`
+    -- 저장된 레퍼런스(광고). 검색 결과 자체는 저장하지 않고, 사용자가 "저장" 누른 것만 여기 들어옵니다.
+    CREATE TABLE IF NOT EXISTS content_references (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID REFERENCES advertisers(id) ON DELETE SET NULL,
+      platform TEXT NOT NULL DEFAULT 'meta',
+      external_id TEXT,
+      page_name TEXT,
+      is_competitor BOOLEAN NOT NULL DEFAULT false,
+      body TEXT,
+      headline TEXT,
+      description TEXT,
+      cta TEXT,
+      landing_url TEXT,
+      thumbnail_url TEXT,
+      media_type TEXT,
+      ad_snapshot_url TEXT,
+      country TEXT,
+      start_date DATE,
+      is_active BOOLEAN,
+      flight_days INTEGER,
+      tags TEXT[] NOT NULL DEFAULT '{}',
+      memo TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_content_references_tenant ON content_references(tenant_id, advertiser_id);
+
+    -- 광고주별로 등록해두는 경쟁 브랜드 목록
+    CREATE TABLE IF NOT EXISTS reference_competitors (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID NOT NULL REFERENCES advertisers(id) ON DELETE CASCADE,
+      brand_name TEXT NOT NULL,
+      page_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_reference_competitors_advertiser ON reference_competitors(advertiser_id);
+
+    -- 레퍼런스 보드(폴더처럼 레퍼런스를 모아두는 단위)
+    CREATE TABLE IF NOT EXISTS reference_boards (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID REFERENCES advertisers(id) ON DELETE SET NULL,
+      name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_reference_boards_tenant ON reference_boards(tenant_id);
+
+    -- 하나의 레퍼런스가 여러 보드에 동시에 들어갈 수 있도록 하는 다대다 연결 테이블
+    CREATE TABLE IF NOT EXISTS reference_board_items (
+      board_id TEXT NOT NULL REFERENCES reference_boards(id) ON DELETE CASCADE,
+      reference_id TEXT NOT NULL REFERENCES content_references(id) ON DELETE CASCADE,
+      added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (board_id, reference_id)
+    );
+  `);
+}
+
+/**
+ * Meta 광고 라이브러리(Ad Library) 연동
+ * ------------------------------------------------------------
+ * 중요: 광고 성과 조회용 META_ACCESS_TOKEN과는 완전히 별개입니다. 신원 확인(Identity
+ * Confirmation, facebook.com/ID)을 통과한 계정/앱의 토큰이 필요합니다. 이미지·영상 원본
+ * 파일은 제공하지 않으며(ad_snapshot_url로 미리보기 페이지만 제공), 상업 광고의 노출·지출
+ * 데이터도 기본적으로 제공되지 않습니다 - 지원되지 않는 성과 데이터를 지어내지 않습니다.
+ */
+const META_AD_LIBRARY_TOKEN = process.env.META_AD_LIBRARY_ACCESS_TOKEN || '';
+const AD_LIBRARY_FIELDS = [
+  'id', 'page_id', 'page_name', 'ad_creation_time', 'ad_delivery_start_time', 'ad_delivery_stop_time',
+  'ad_creative_bodies', 'ad_creative_link_titles', 'ad_creative_link_descriptions', 'ad_creative_link_captions',
+  'ad_snapshot_url', 'publisher_platforms', 'languages',
+].join(',');
+function adLibraryConfigured() { return Boolean(META_AD_LIBRARY_TOKEN); }
+
+/** 광고 시작일과 종료 여부로 게재일수를 계산합니다(종료됐으면 종료일까지, 운영 중이면 오늘까지). */
+function computeFlightDays(startTime, stopTime) {
+  if (!startTime) return null;
+  const start = new Date(startTime);
+  const end = stopTime ? new Date(stopTime) : new Date();
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+  return Number.isFinite(days) && days >= 0 ? days : null;
+}
+function normalizeAdLibraryRow(row) {
+  const flightDays = computeFlightDays(row.ad_delivery_start_time, row.ad_delivery_stop_time);
+  return {
+    externalId: row.id, pageId: row.page_id || null, pageName: row.page_name || '(페이지명 없음)',
+    body: (row.ad_creative_bodies || [])[0] || '', headline: (row.ad_creative_link_titles || [])[0] || '',
+    description: (row.ad_creative_link_descriptions || [])[0] || '', cta: (row.ad_creative_link_captions || [])[0] || '',
+    adSnapshotUrl: row.ad_snapshot_url || null,
+    startDate: row.ad_delivery_start_time ? row.ad_delivery_start_time.slice(0, 10) : null,
+    isActive: !row.ad_delivery_stop_time, flightDays,
+    // 30일 이상 계속 게재 중이면 "장기 게재" 후보로 봅니다. 실제 성과(ROAS 등)를 확인한 게
+    // 아니므로 "성과 우수"라고 단정하지 않고 "장기 게재"라고만 표현합니다.
+    isLongRunning: flightDays !== null && flightDays >= 30 && !row.ad_delivery_stop_time,
+    platforms: row.publisher_platforms || [],
+  };
+}
+/** 키워드 또는 특정 페이지 ID로 Meta 광고 라이브러리를 검색합니다. */
+async function searchMetaAdLibrary({ keyword, pageIds, country = 'KR' }) {
+  if (!adLibraryConfigured()) throw new Error('Meta 광고 라이브러리 API가 연결되지 않았습니다. 관리자가 META_AD_LIBRARY_ACCESS_TOKEN(신원 확인을 마친 토큰)을 설정해야 합니다.');
+  if (!keyword && (!pageIds || !pageIds.length)) throw new Error('검색어 또는 경쟁 브랜드(페이지)를 선택하세요.');
+  const params = new URLSearchParams({ access_token: META_AD_LIBRARY_TOKEN, ad_reached_countries: JSON.stringify([country]), ad_type: 'ALL', fields: AD_LIBRARY_FIELDS, limit: '50' });
+  if (keyword) params.set('search_terms', keyword);
+  if (pageIds && pageIds.length) params.set('search_page_ids', JSON.stringify(pageIds));
+  const res = await fetch(`https://graph.facebook.com/v21.0/ads_archive?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error?.message || `Meta 광고 라이브러리 API HTTP ${res.status}`);
+  return (data.data || []).map(normalizeAdLibraryRow);
+}
+
 async function ensureBlogTables() {
   if (!pgPool) return;
   await pgPool.query(`
@@ -346,6 +460,7 @@ if (pgPool) {
   ensureDocumentTables().catch(error => console.error('[Content Studio] document table check failed:', error?.message || error));
   ensureVideoScriptTables().catch(error => console.error('[Content Studio] video script table check failed:', error?.message || error));
   ensureAssetTables().catch(error => console.error('[Content Studio] asset table check failed:', error?.message || error));
+  ensureReferenceTables().catch(error => console.error('[Content Studio] reference table check failed:', error?.message || error));
 }
 
 function sendJson(res, status, body) {
@@ -671,6 +786,146 @@ const server = http.createServer(async (req, res) => {
         if (assetMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(assetMatch[1]);
           await pgPool.query(`DELETE FROM content_assets WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return sendJson(res, 200, { ok: true });
+        }
+      }
+
+      if (pathname.startsWith('/api/references')) {
+        if (!requireDb(res)) return;
+        const tenantId = await getCurrentTenantId();
+        if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
+
+        // 실시간 검색 - 저장하지 않고 결과만 보여줍니다.
+        if (req.method === 'POST' && pathname === '/api/references/search') {
+          const body = await readJson(req);
+          try {
+            const results = await searchMetaAdLibrary({ keyword: cleanText(body.keyword || '', 200), pageIds: Array.isArray(body.pageIds) ? body.pageIds : undefined, country: cleanText(body.country || 'KR', 5) });
+            return sendJson(res, 200, { status: 'ok', results });
+          } catch (error) {
+            return sendJson(res, 200, { status: 'error', error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+        if (req.method === 'GET' && pathname === '/api/references/connector-status') {
+          return sendJson(res, 200, { configured: adLibraryConfigured() });
+        }
+
+        // 저장된 레퍼런스 목록/저장/삭제
+        if (req.method === 'GET' && pathname === '/api/references') {
+          const q = new URL(req.url, 'http://x').searchParams;
+          const advertiserId = cleanText(q.get('advertiserId') || '', 120);
+          const clauses = ['r.tenant_id = $1']; const params = [tenantId];
+          if (advertiserId) { params.push(advertiserId); clauses.push(`r.advertiser_id::text = $${params.length}`); }
+          const r = await pgPool.query(
+            `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
+                    r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
+                    r.landing_url as "landingUrl", r.thumbnail_url as "thumbnailUrl", r.ad_snapshot_url as "adSnapshotUrl",
+                    r.start_date as "startDate", r.is_active as "isActive", r.flight_days as "flightDays", r.tags, r.memo,
+                    r.created_at as "createdAt",
+                    COALESCE(json_agg(json_build_object('boardId', bi.board_id, 'boardName', b.name)) FILTER (WHERE bi.board_id IS NOT NULL), '[]') as boards
+             FROM content_references r
+             LEFT JOIN advertisers a ON a.id = r.advertiser_id
+             LEFT JOIN reference_board_items bi ON bi.reference_id = r.id
+             LEFT JOIN reference_boards b ON b.id = bi.board_id
+             WHERE ${clauses.join(' AND ')} GROUP BY r.id, a.name ORDER BY r.created_at DESC`, params);
+          return sendJson(res, 200, r.rows);
+        }
+        if (req.method === 'POST' && pathname === '/api/references') {
+          const body = await readJson(req);
+          const id = makeId('ref');
+          let advertiserUuid = null;
+          if (body.advertiserId) {
+            const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]);
+            advertiserUuid = advRes.rows[0]?.id || null;
+          }
+          const flightDays = Number.isFinite(body.flightDays) ? body.flightDays : null;
+          await pgPool.query(
+            `INSERT INTO content_references (id, tenant_id, advertiser_id, platform, external_id, page_name, is_competitor, body, headline, description, cta, landing_url, thumbnail_url, media_type, ad_snapshot_url, country, start_date, is_active, flight_days, tags, memo)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+            [id, tenantId, advertiserUuid, cleanText(body.platform || 'meta', 20), cleanText(body.externalId || '', 120) || null,
+             cleanText(body.pageName || '', 200), Boolean(body.isCompetitor), cleanText(body.body || '', 4000), cleanText(body.headline || '', 300),
+             cleanText(body.description || '', 1000), cleanText(body.cta || '', 100), cleanText(body.landingUrl || '', 1000) || null,
+             cleanText(body.thumbnailUrl || '', 1000) || null, cleanText(body.mediaType || '', 30), cleanText(body.adSnapshotUrl || '', 1000) || null,
+             cleanText(body.country || 'KR', 5), body.startDate || null, body.isActive === undefined ? null : Boolean(body.isActive), flightDays,
+             Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 60)).filter(Boolean) : [], cleanText(body.memo || '', 1000) || null]
+          );
+          return sendJson(res, 201, { id });
+        }
+        const refMatch = pathname.match(/^\/api\/references\/([^/]+)$/);
+        if (refMatch && req.method === 'PATCH') {
+          const id = decodeURIComponent(refMatch[1]);
+          const body = await readJson(req);
+          const sets = []; const params = [tenantId, id];
+          if (body.memo !== undefined) { params.push(cleanText(body.memo, 1000)); sets.push(`memo=$${params.length}`); }
+          if (body.tags !== undefined) { params.push(Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 60)).filter(Boolean) : []); sets.push(`tags=$${params.length}`); }
+          if (!sets.length) return sendJson(res, 400, { error: '수정할 내용이 없습니다.' });
+          await pgPool.query(`UPDATE content_references SET ${sets.join(', ')}, updated_at=now() WHERE tenant_id=$1 AND id=$2`, params);
+          return sendJson(res, 200, { ok: true });
+        }
+        if (refMatch && req.method === 'DELETE') {
+          const id = decodeURIComponent(refMatch[1]);
+          await pgPool.query(`DELETE FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return sendJson(res, 200, { ok: true });
+        }
+
+        // 레퍼런스 보드 CRUD
+        if (req.method === 'GET' && pathname === '/api/reference-boards') {
+          const r = await pgPool.query(
+            `SELECT b.id, b.advertiser_id::text as "advertiserId", b.name, b.created_at as "createdAt", COUNT(bi.reference_id)::int as "itemCount"
+             FROM reference_boards b LEFT JOIN reference_board_items bi ON bi.board_id = b.id
+             WHERE b.tenant_id=$1 GROUP BY b.id ORDER BY b.created_at DESC`, [tenantId]);
+          return sendJson(res, 200, r.rows);
+        }
+        if (req.method === 'POST' && pathname === '/api/reference-boards') {
+          const body = await readJson(req);
+          const name = cleanText(body.name, 120);
+          if (!name) return sendJson(res, 400, { error: '보드 이름을 입력하세요.' });
+          const id = makeId('board');
+          let advertiserUuid = null;
+          if (body.advertiserId) { const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]); advertiserUuid = advRes.rows[0]?.id || null; }
+          await pgPool.query(`INSERT INTO reference_boards (id, tenant_id, advertiser_id, name) VALUES ($1,$2,$3,$4)`, [id, tenantId, advertiserUuid, name]);
+          return sendJson(res, 201, { id, name });
+        }
+        const boardMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)$/);
+        if (boardMatch && req.method === 'DELETE') {
+          await pgPool.query(`DELETE FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(boardMatch[1])]);
+          return sendJson(res, 200, { ok: true });
+        }
+        const boardItemMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
+        if (boardItemMatch && req.method === 'POST') {
+          const body = await readJson(req);
+          const referenceId = cleanText(body.referenceId || '', 120);
+          if (!referenceId) return sendJson(res, 400, { error: 'referenceId가 필요합니다.' });
+          await pgPool.query(`INSERT INTO reference_board_items (board_id, reference_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [decodeURIComponent(boardItemMatch[1]), referenceId]);
+          return sendJson(res, 200, { ok: true });
+        }
+        const boardItemRemoveMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items\/([^/]+)$/);
+        if (boardItemRemoveMatch && req.method === 'DELETE') {
+          await pgPool.query(`DELETE FROM reference_board_items WHERE board_id=$1 AND reference_id=$2`, [decodeURIComponent(boardItemRemoveMatch[1]), decodeURIComponent(boardItemRemoveMatch[2])]);
+          return sendJson(res, 200, { ok: true });
+        }
+
+        // 경쟁 브랜드 CRUD
+        if (req.method === 'GET' && pathname === '/api/reference-competitors') {
+          const q = new URL(req.url, 'http://x').searchParams;
+          const advertiserId = cleanText(q.get('advertiserId') || '', 120);
+          const clauses = ['tenant_id=$1']; const params = [tenantId];
+          if (advertiserId) { params.push(advertiserId); clauses.push(`advertiser_id::text=$${params.length}`); }
+          const r = await pgPool.query(`SELECT id, advertiser_id::text as "advertiserId", brand_name as "brandName", page_name as "pageName", created_at as "createdAt" FROM reference_competitors WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params);
+          return sendJson(res, 200, r.rows);
+        }
+        if (req.method === 'POST' && pathname === '/api/reference-competitors') {
+          const body = await readJson(req);
+          const brandName = cleanText(body.brandName, 120);
+          if (!brandName || !body.advertiserId) return sendJson(res, 400, { error: '광고주와 경쟁 브랜드명을 입력하세요.' });
+          const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]);
+          if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+          const id = makeId('competitor');
+          await pgPool.query(`INSERT INTO reference_competitors (id, tenant_id, advertiser_id, brand_name, page_name) VALUES ($1,$2,$3,$4,$5)`, [id, tenantId, advRes.rows[0].id, brandName, cleanText(body.pageName || '', 200) || null]);
+          return sendJson(res, 201, { id, brandName });
+        }
+        const competitorMatch = pathname.match(/^\/api\/reference-competitors\/([^/]+)$/);
+        if (competitorMatch && req.method === 'DELETE') {
+          await pgPool.query(`DELETE FROM reference_competitors WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(competitorMatch[1])]);
           return sendJson(res, 200, { ok: true });
         }
       }
