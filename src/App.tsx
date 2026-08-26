@@ -11,6 +11,7 @@ import { AdCreationPage } from './features/ad/AdCreationPage';
 import { TemplatesPage } from './features/templates/TemplatesPage';
 import { DocumentWritingPage } from './features/document/DocumentWritingPage';
 import { VideoScriptPage } from './features/videoscript/VideoScriptPage';
+import { ProductionLibraryPage } from './features/library/ProductionLibraryPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -44,7 +45,7 @@ export default function App() {
       <Route path="/production/video-script" element={<RequireAuth><VideoScriptPage /></RequireAuth>} />
       <Route path="/production/document" element={<RequireAuth><DocumentWritingPage /></RequireAuth>} />
 
-      <Route path="/library" element={<Stub title="제작물 보관함" phase="PHASE 2" />} />
+      <Route path="/library" element={<RequireAuth><ProductionLibraryPage /></RequireAuth>} />
       <Route path="/calendar" element={<Stub title="콘텐츠 캘린더" phase="PHASE 2" />} />
       <Route path="/templates" element={<RequireAuth><TemplatesPage /></RequireAuth>} />
 
