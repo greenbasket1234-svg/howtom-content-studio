@@ -295,6 +295,24 @@ async function ensureVideoScriptTables() {
   `);
 }
 
+async function ensureAssetTables() {
+  if (!pgPool) return;
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS content_assets (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      advertiser_id UUID REFERENCES advertisers(id) ON DELETE SET NULL,
+      asset_type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      url TEXT,
+      tags TEXT[] NOT NULL DEFAULT '{}',
+      memo TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_content_assets_tenant ON content_assets(tenant_id, asset_type);
+  `);
+}
+
 async function ensureBlogTables() {
   if (!pgPool) return;
   await pgPool.query(`
@@ -327,6 +345,7 @@ if (pgPool) {
   ensureTemplateTables().catch(error => console.error('[Content Studio] template table check failed:', error?.message || error));
   ensureDocumentTables().catch(error => console.error('[Content Studio] document table check failed:', error?.message || error));
   ensureVideoScriptTables().catch(error => console.error('[Content Studio] video script table check failed:', error?.message || error));
+  ensureAssetTables().catch(error => console.error('[Content Studio] asset table check failed:', error?.message || error));
 }
 
 function sendJson(res, status, body) {
@@ -616,6 +635,42 @@ const server = http.createServer(async (req, res) => {
         if (vsMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(vsMatch[1]);
           await pgPool.query(`DELETE FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          return sendJson(res, 200, { ok: true });
+        }
+      }
+
+      if (pathname.startsWith('/api/assets')) {
+        if (!requireDb(res)) return;
+        const tenantId = await getCurrentTenantId();
+        if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
+
+        if (req.method === 'GET' && pathname === '/api/assets') {
+          const q = new URL(req.url, 'http://x').searchParams;
+          const assetType = cleanText(q.get('type') || '', 20);
+          const clauses = ['tenant_id = $1']; const params = [tenantId];
+          if (assetType) { params.push(assetType); clauses.push(`asset_type = $${params.length}`); }
+          const r = await pgPool.query(`SELECT id, advertiser_id::text as "advertiserId", asset_type as "assetType", name, url, tags, memo, created_at as "createdAt" FROM content_assets WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params);
+          return sendJson(res, 200, r.rows);
+        }
+        if (req.method === 'POST' && pathname === '/api/assets') {
+          const body = await readJson(req);
+          const name = cleanText(body.name, 200); const assetType = cleanText(body.assetType, 20);
+          if (!name || !assetType) return sendJson(res, 400, { error: '이름과 유형을 입력하세요.' });
+          const id = makeId('asset');
+          const tags = Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 60)).filter(Boolean) : [];
+          let advertiserUuid = null, advertiserName = null;
+          if (body.advertiserId) {
+            const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]);
+            if (advRes.rows[0]) { advertiserUuid = advRes.rows[0].id; advertiserName = advRes.rows[0].name; }
+          }
+          await pgPool.query(`INSERT INTO content_assets (id, tenant_id, advertiser_id, asset_type, name, url, tags, memo) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [id, tenantId, advertiserUuid, assetType, name, cleanText(body.url || '', 1000) || null, tags, cleanText(body.memo || '', 1000) || null]);
+          return sendJson(res, 201, { id, advertiserId: advertiserUuid, advertiserName, assetType, name, url: body.url || null, tags, createdAt: new Date().toISOString() });
+        }
+        const assetMatch = pathname.match(/^\/api\/assets\/([^/]+)$/);
+        if (assetMatch && req.method === 'DELETE') {
+          const id = decodeURIComponent(assetMatch[1]);
+          await pgPool.query(`DELETE FROM content_assets WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
       }

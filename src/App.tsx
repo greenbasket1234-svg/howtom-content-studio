@@ -13,6 +13,7 @@ import { DocumentWritingPage } from './features/document/DocumentWritingPage';
 import { VideoScriptPage } from './features/videoscript/VideoScriptPage';
 import { ProductionLibraryPage } from './features/library/ProductionLibraryPage';
 import { ContentCalendarPage } from './features/calendar/ContentCalendarPage';
+import { AssetsPage } from './features/assets/AssetsPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user } = useAuth();
@@ -50,9 +51,9 @@ export default function App() {
       <Route path="/calendar" element={<RequireAuth><ContentCalendarPage /></RequireAuth>} />
       <Route path="/templates" element={<RequireAuth><TemplatesPage /></RequireAuth>} />
 
-      <Route path="/assets/images" element={<Stub title="이미지 자산" phase="PHASE 2" />} />
-      <Route path="/assets/videos" element={<Stub title="영상 자산" phase="PHASE 2" />} />
-      <Route path="/assets/documents" element={<Stub title="문서 자산" phase="PHASE 2" />} />
+      <Route path="/assets/images" element={<RequireAuth><AssetsPage assetType="image" /></RequireAuth>} />
+      <Route path="/assets/videos" element={<RequireAuth><AssetsPage assetType="video" /></RequireAuth>} />
+      <Route path="/assets/documents" element={<RequireAuth><AssetsPage assetType="document" /></RequireAuth>} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
