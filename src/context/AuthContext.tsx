@@ -50,7 +50,12 @@ export async function apiFetch<T = unknown>(path: string, options: RequestInit =
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers ?? {}) },
   });
   if (res.status === 401) { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY); window.location.reload(); throw new Error('인증이 만료되었습니다.'); }
-  const data = await res.json() as T & { error?: string };
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? res.statusText);
+  const data = await res.json() as T & { error?: string; code?: string };
+  if (!res.ok) {
+    const err = new Error((data as { error?: string }).error ?? res.statusText) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    err.code = (data as { code?: string }).code;
+    throw err;
+  }
   return data;
 }

@@ -7,7 +7,7 @@ import {
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertisers } from '../../hooks/useAdvertisers';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
-import { blogApi } from './blogApi';
+import { blogApi, OverageConfirmRequiredError } from './blogApi';
 import { analyzeBlogSeo } from './blogSeoEngine';
 import { analyzeCompliance, isMedicalIndustry } from './complianceEngine';
 import type { BlogAsset, BlogBlock, BlogBlockType, BlogProject, BlogStyleProfile } from './blogTypes';
@@ -16,7 +16,7 @@ import { frontendBlogProviderAdapter, getAdvertiserBlogIntegration, upsertBlogIn
 const INDUSTRIES=['일반 서비스업','병원·의료기관','치과','한의원','동물병원','세무사·세무법인','학원·교육','자동차·렌트·리스','식품·쇼핑몰','부동산','법률'];
 const STATUS_LABEL:Record<string,string>={draft:'초안',writing:'작성 중',review:'검토 요청',revision:'수정 필요',approved:'승인 완료','publish-ready':'발행 대기',published:'발행 완료',archived:'보관'};
 const REVIEW_LABEL:Record<string,string>={'not-reviewed':'검토 전','check-needed':'확인 필요',preparing:'심의 준비',submitted:'심의 중','revision-requested':'수정 요청',approved:'심의 완료','not-required':'심의 불필요 확인'};
-const BLOCK_LABEL:Record<BlogBlockType,string>={paragraph:'본문',h2:'소제목',h3:'소제목 2',image:'사진',list:'목록',quote:'인용문',faq:'FAQ',cta:'CTA',divider:'구분선'};
+const BLOCK_LABEL:Record<BlogBlockType,string>={paragraph:'본문',h2:'소제목',h3:'소제목 2',image:'사진',list:'목록',quote:'인용문',faq:'FAQ',cta:'CTA',divider:'구분선',html:'외부 생성 본문(HTML)'};
 const uid=(p:string)=>`${p}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
 const emptyStyle=(advertiserId:string):BlogStyleProfile=>({advertiserId,tone:'',rules:[],preferredPhrases:[],prohibitedPhrases:[],cta:'',sourceTexts:[]});
 const split=(value:string)=>value.split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
@@ -33,6 +33,7 @@ export function BlogProductionPage(){
   const [project,setProject]=useState<BlogProject|null>(null);
   const [loading,setLoading]=useState(true);
   const [notice,setNotice]=useState('');
+  const [overageConfirm,setOverageConfirm]=useState<{message:string}|null>(null);
   const [query,setQuery]=useState('');
   const [selectedAdvertiser,setSelectedAdvertiser]=useState(()=>isAllSelected?'':globalAdvertiserId);
   const [style,setStyle]=useState<BlogStyleProfile|null>(null);
@@ -44,7 +45,7 @@ export function BlogProductionPage(){
   const [apiSendOpen,setApiSendOpen]=useState(false);
   const [aiStatus,setAiStatus]=useState<{configured:boolean;provider:string|null}|null>(null);
   const integration=project?getAdvertiserBlogIntegration(project.advertiserId):undefined;
-  const buildHtml=(p:BlogProject)=>`<!doctype html><html lang="ko"><meta charset="utf-8"><title>${p.selectedTitle}</title><body><h1>${p.selectedTitle}</h1>${p.blocks.map(b=>b.type==='h2'?`<h2>${b.title||''}</h2><p>${b.text||''}</p>`:b.type==='h3'?`<h3>${b.title||''}</h3><p>${b.text||''}</p>`:b.type==='divider'?'<hr>':`<section><strong>${b.title||''}</strong><p>${(b.text||'').replace(/\n/g,'<br>')}</p></section>`).join('')}</body></html>`;
+  const buildHtml=(p:BlogProject)=>`<!doctype html><html lang="ko"><meta charset="utf-8"><title>${p.selectedTitle}</title><body><h1>${p.selectedTitle}</h1>${p.blocks.map(b=>b.type==='html'?(b.text||''):b.type==='h2'?`<h2>${b.title||''}</h2><p>${b.text||''}</p>`:b.type==='h3'?`<h3>${b.title||''}</h3><p>${b.text||''}</p>`:b.type==='divider'?'<hr>':`<section><strong>${b.title||''}</strong><p>${(b.text||'').replace(/\n/g,'<br>')}</p></section>`).join('')}</body></html>`;
   const sendExternal=async(credentials?:{username:string;appPassword:string})=>{
     if(!project||!integration)return;
     if(integration.mode==='api'&&!credentials){setApiSendOpen(true);return;}
@@ -91,17 +92,23 @@ export function BlogProductionPage(){
   };
   const patchLocal=(changes:Partial<BlogProject>)=>project&&setProject({...project,...changes});
   const save=async()=>{if(!project)return;const body=project.medicalReview.locked?{status:project.status,publishStatus:project.publishStatus,medicalReview:project.medicalReview,seoScore:project.seoScore,complianceStatus:project.complianceStatus,complianceIssues:project.complianceIssues}:project;await patch(body);setNotice('서버에 저장했습니다.');};
-  const generate=async()=>{
+  const generate=async(confirmOverage=false)=>{
     if(!project?.primaryKeyword){setNotice('메인 키워드를 먼저 입력하세요.');return;}
+    setOverageConfirm(null);
     try{
-      const result=await blogApi.generate(project);const next={...project,titleOptions:result.titles,selectedTitle:result.titles[0]||'',blocks:result.blocks,status:'writing' as const};setProject(next);await blogApi.patchProject(project.projectId,next);
+      const idempotencyKey=`${project.projectId}-${Date.now()}`;
+      const result=await blogApi.generate({...project,confirmOverage,idempotencyKey});const next={...project,titleOptions:result.titles,selectedTitle:result.titles[0]||'',blocks:result.blocks,status:'writing' as const};setProject(next);await blogApi.patchProject(project.projectId,next);
       const message=
-        result.generator==='rule-based-fallback'?`외부 AI 호출에 실패해 규칙 기반 초안으로 대체했습니다. (${result.aiError||'알 수 없는 오류'})`
+        result.generator==='autopost-pro'?'오토포스트 Pro가 초안을 생성했습니다.'
+        :result.generator==='rule-based-fallback'?`외부 AI 호출에 실패해 규칙 기반 초안으로 대체했습니다. (${result.aiError||'알 수 없는 오류'})`
         :result.generator==='rule-based-backend'?'백엔드 규칙 기반 초안을 생성했습니다. BLOG_AI_PROVIDER를 설정하면 외부 AI가 대신 작성합니다.'
         :'외부 AI가 초안을 생성했습니다.';
       setNotice(message);
     }
-    catch(e){setNotice(e instanceof Error?e.message:'초안 생성에 실패했습니다.');}
+    catch(e){
+      if(e instanceof OverageConfirmRequiredError){setOverageConfirm({message:e.message});return;}
+      setNotice(e instanceof Error?e.message:'초안 생성에 실패했습니다.');
+    }
   };
   const runReview=async()=>{if(!project)return;const issues=analyzeCompliance(project);const score=analyzeBlogSeo(project).score;await patch({complianceIssues:issues,complianceStatus:issues.some(x=>x.severity==='danger')?'revision':'reviewed',seoScore:score,status:issues.some(x=>x.severity==='danger')?'revision':'review'});setNotice(`사전점검 완료: ${issues.length}개 확인 항목이 있습니다.`);};
   const addBlock=(type:BlogBlockType)=>patchLocal({blocks:[...project!.blocks,{blockId:uid('block'),type,title:type==='h2'?'새 소제목':type==='faq'?'자주 묻는 질문':type==='cta'?'안내':'',text:''}]});
@@ -111,7 +118,7 @@ export function BlogProductionPage(){
   const unlock=async()=>{if(!project)return;await patch({unlockForRevision:true,medicalReview:{...project.medicalReview,locked:false,status:'revision-requested'},status:'revision'});setNotice('문안 잠금을 해제하고 재검토 상태로 전환했습니다.');};
   const lockApproved=async()=>{if(!project)return;await patch({medicalReview:{...project.medicalReview,status:'approved',locked:true,reviewedAt:project.medicalReview.reviewedAt||new Date().toISOString()},status:'approved'});setNotice('심의 완료 문안을 잠갔습니다.');};
   const deleteProject=async(id:string)=>{const target=projects.find(x=>x.projectId===id);if(!window.confirm(`“${target?.selectedTitle||target?.primaryKeyword||'제목 미정'}” 글을 삭제할까요?`))return;try{await blogApi.deleteProject(id);setProjects(rows=>rows.filter(x=>x.projectId!==id));if(project?.projectId===id)setParams({});setNotice('블로그 글을 삭제했습니다.');}catch(e){setNotice(e instanceof Error?e.message:'삭제하지 못했습니다.');}};
-  const exportFile=(kind:'html'|'txt')=>{if(!project)return;const body=project.blocks.map(b=>`${b.title||''}\n${b.text||''}`).join('\n\n');const html=`<!doctype html><html lang="ko"><meta charset="utf-8"><title>${project.selectedTitle}</title><body><h1>${project.selectedTitle}</h1>${project.blocks.map(b=>b.type==='h2'?`<h2>${b.title}</h2><p>${b.text||''}</p>`:b.type==='h3'?`<h3>${b.title}</h3><p>${b.text||''}</p>`:b.type==='divider'?'<hr>':`<section><strong>${b.title||''}</strong><p>${(b.text||'').replace(/\n/g,'<br>')}</p></section>`).join('')}</body></html>`;const value=kind==='html'?html:`${project.selectedTitle}\n\n${body}`;const blob=new Blob([value],{type:kind==='html'?'text/html;charset=utf-8':'text/plain;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${project.selectedTitle||'blog'}.${kind}`;a.click();URL.revokeObjectURL(url);};
+  const exportFile=(kind:'html'|'txt')=>{if(!project)return;const body=project.blocks.map(b=>`${b.title||''}\n${b.text||''}`).join('\n\n');const html=`<!doctype html><html lang="ko"><meta charset="utf-8"><title>${project.selectedTitle}</title><body><h1>${project.selectedTitle}</h1>${project.blocks.map(b=>b.type==='html'?(b.text||''):b.type==='h2'?`<h2>${b.title}</h2><p>${b.text||''}</p>`:b.type==='h3'?`<h3>${b.title}</h3><p>${b.text||''}</p>`:b.type==='divider'?'<hr>':`<section><strong>${b.title||''}</strong><p>${(b.text||'').replace(/\n/g,'<br>')}</p></section>`).join('')}</body></html>`;const value=kind==='html'?html:`${project.selectedTitle}\n\n${body}`;const blob=new Blob([value],{type:kind==='html'?'text/html;charset=utf-8':'text/plain;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${project.selectedTitle||'blog'}.${kind}`;a.click();URL.revokeObjectURL(url);};
 
   if(loading)return <div className="blog26-page"><PageHeader title="블로그 제작" description="서버 데이터를 불러오는 중입니다."/><div className="blog26-loading">불러오는 중…</div></div>;
   if(!project)return <BlogDashboard advertisers={advertisers} projects={filtered} allProjects={projects} selectedAdvertiser={selectedAdvertiser} setSelectedAdvertiser={setSelectedAdvertiser} query={query} setQuery={setQuery} onCreate={create} onOpen={id=>setParams({project:id})} onDelete={deleteProject} notice={notice}/>;
@@ -145,7 +152,12 @@ export function BlogProductionPage(){
           {medical&&<label className="medical"><input type="checkbox" checked={project.options.medical} onChange={e=>patchLocal({options:{...project.options,medical:e.target.checked}})}/> 의료광고 사전점검</label>}
         </div>
         <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured}><Sparkles size={16}/> 초안 만들기</button>
-        <small className="blog26-help">{aiStatus?.configured?'제휴 업체 AI가 초안을 작성합니다.':'블로그 AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결됩니다(연동 필요). 현재는 직접 작성·편집·저장 기능을 사용하세요.'}</small>
+        <small className="blog26-help">{aiStatus?.provider==='autopost-pro'?'오토포스트 Pro가 업종별 규정을 반영해 초안을 작성합니다.':aiStatus?.configured?'제휴 업체 AI가 초안을 작성합니다.':'블로그 AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결됩니다(연동 필요). 현재는 직접 작성·편집·저장 기능을 사용하세요.'}</small>
+        {overageConfirm&&<div className="blog26-lockbar" style={{borderColor:'#e08a00',background:'#fff8ec',color:'#7a4a00'}}>
+          <span><b>월 한도 초과 - 유료 결제 동의 필요</b><br/>{overageConfirm.message}</span>
+          <button className="btn primary" onClick={()=>void generate(true)}>동의하고 진행</button>
+          <button className="btn secondary" onClick={()=>setOverageConfirm(null)}>취소</button>
+        </div>}
       </aside>
 
       <main className="blog26-editor card">
