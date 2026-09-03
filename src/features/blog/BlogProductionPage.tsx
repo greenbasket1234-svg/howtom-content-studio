@@ -181,13 +181,14 @@ export function BlogProductionPage(){
   const exportFile=(kind:'html'|'txt')=>{if(!project)return;const body=project.blocks.map(b=>b.type==='html'?stripHtml(b.text||''):`${b.title||''}\n${b.text||''}`).join('\n\n');const html=`<!doctype html><html lang="ko"><meta charset="utf-8"><title>${project.selectedTitle}</title><body><h1>${project.selectedTitle}</h1>${project.blocks.map(b=>b.type==='html'?sanitizeHtml(b.text||''):b.type==='h2'?`<h2>${b.title}</h2><p>${b.text||''}</p>`:b.type==='h3'?`<h3>${b.title}</h3><p>${b.text||''}</p>`:b.type==='divider'?'<hr>':`<section><strong>${b.title||''}</strong><p>${(b.text||'').replace(/\n/g,'<br>')}</p></section>`).join('')}</body></html>`;const value=kind==='html'?html:`${project.selectedTitle}\n\n${body}`;const blob=new Blob([value],{type:kind==='html'?'text/html;charset=utf-8':'text/plain;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${project.selectedTitle||'blog'}.${kind}`;a.click();URL.revokeObjectURL(url);};
 
   if(loading)return <div className="blog26-page"><PageHeader title="블로그 제작" description="서버 데이터를 불러오는 중입니다."/><div className="blog26-loading">불러오는 중…</div></div>;
-  if(!project)return <BlogDashboard advertisers={advertisers} projects={filtered} allProjects={projects} selectedAdvertiser={selectedAdvertiser} setSelectedAdvertiser={setSelectedAdvertiser} query={query} setQuery={setQuery} onCreate={create} onOpen={id=>setParams({project:id})} onDelete={deleteProject} notice={notice}/>;
+  if(!project)return <BlogDashboard advertisers={advertisers} projects={filtered} allProjects={projects} selectedAdvertiser={selectedAdvertiser} setSelectedAdvertiser={setSelectedAdvertiser} query={query} setQuery={setQuery} onCreate={create} onOpen={id=>setParams({project:id})} onDelete={deleteProject} notice={notice} aiStatus={aiStatus}/>;
 
   const medical=isMedicalIndustry(project.industry);
   const AUTOPOST_SUPPORTED_INDUSTRIES:Record<string,string>={'병원·의료기관':'medical','치과':'medical','한의원':'medical','동물병원':'vet','세무사·세무법인':'tax','학원·교육':'academy'};
   const autopostIndustrySupported=aiStatus?.provider!=='autopost-pro'||Boolean(AUTOPOST_SUPPORTED_INDUSTRIES[project.industry]);
   return <div className="blog26-page">
     <PageHeader title="블로그 제작" description="광고주 정보·문체·자산·SEO·업종별 규정 검수를 한 워크스페이스에서 관리합니다." action={<div className="blog26-head-actions"><button className="btn secondary" onClick={()=>setParams({})}><ChevronLeft size={15}/> 목록</button><button className="btn secondary" onClick={()=>exportFile('txt')}><FileDown size={15}/> TXT</button><button className="btn secondary" onClick={()=>exportFile('html')}><FileDown size={15}/> HTML</button><button className="btn secondary" onClick={()=>setIntegrationOpen(true)}><Link2 size={15}/> 외부 연동</button>{integration&&<button className="btn secondary" onClick={()=>void sendExternal()}><ExternalLink size={15}/> 외부 업체로 보내기</button>}<button className="btn primary" onClick={()=>void save()}><Save size={15}/> 서버 저장</button></div>}/>
+    <AutopostProStatusBanner aiStatus={aiStatus}/>
     {notice&&<div className="blog26-notice">{notice}<button onClick={()=>setNotice('')}>×</button></div>}
     {project.medicalReview.locked&&<div className="blog26-lockbar"><Lock size={16}/><b>심의 완료 문안 잠금</b><span>제목과 본문이 잠겨 있습니다. 수정하려면 재검토 상태로 전환하세요.</span><button className="btn secondary" onClick={()=>void unlock()}><Unlock size={14}/> 재검토로 전환</button></div>}
     <div className="blog26-workspace">
@@ -262,7 +263,28 @@ export function BlogProductionPage(){
   </div>;
 }
 
-function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setSelectedAdvertiser,query,setQuery,onCreate,onOpen,onDelete,notice}:{advertisers:ReturnType<typeof useAdvertisers>[0];projects:BlogProject[];allProjects:BlogProject[];selectedAdvertiser:string;setSelectedAdvertiser:(v:string)=>void;query:string;setQuery:(v:string)=>void;onCreate:()=>void;onOpen:(id:string)=>void;onDelete:(id:string)=>void;notice:string}){
+/** 오토포스트 Pro가 실제로 연결되어 있는지 한눈에 보여줍니다. "설정되어 있음"과
+ * "실제로 작동함"은 다른 문제라서, 버튼을 눌러야 하는 실시간 연동 테스트를 따로 둡니다. */
+function AutopostProStatusBanner({aiStatus}:{aiStatus:{configured:boolean;provider:string|null}|null}){
+  const [testing,setTesting]=useState(false);
+  const [testResult,setTestResult]=useState<{connected:boolean;reason:string}|null>(null);
+  const runTest=async()=>{
+    setTesting(true);setTestResult(null);
+    try{setTestResult(await blogApi.testAutopostProConnection());}
+    catch(e){setTestResult({connected:false,reason:e instanceof Error?e.message:'연동 테스트에 실패했습니다.'});}
+    finally{setTesting(false);}
+  };
+  if(aiStatus===null)return null;
+  const configured=aiStatus.provider==='autopost-pro';
+  return <div className={`blog26-autopost-status ${configured?'on':'off'}`}>
+    <div><b>{configured?'✅ 오토포스트 Pro 연결됨':'⚠️ 오토포스트 Pro 미연결'}</b>
+      <span>{configured?'AUTOPOST_PRO_API_KEY가 설정되어 있습니다.':'AUTOPOST_PRO_API_KEY가 설정되어 있지 않습니다. Railway 환경변수에 추가한 뒤 재배포하세요.'}</span>
+    </div>
+    {configured&&<button type="button" className="btn secondary mini" onClick={()=>void runTest()} disabled={testing}>{testing?'테스트 중...':'실시간 연동 테스트'}</button>}
+    {testResult&&<div className={`blog26-autopost-testresult ${testResult.connected?'ok':'fail'}`}>{testResult.connected?'✓':'✗'} {testResult.reason}</div>}
+  </div>;
+}
+function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setSelectedAdvertiser,query,setQuery,onCreate,onOpen,onDelete,notice,aiStatus}:{advertisers:ReturnType<typeof useAdvertisers>[0];projects:BlogProject[];allProjects:BlogProject[];selectedAdvertiser:string;setSelectedAdvertiser:(v:string)=>void;query:string;setQuery:(v:string)=>void;onCreate:()=>void;onOpen:(id:string)=>void;onDelete:(id:string)=>void;notice:string;aiStatus:{configured:boolean;provider:string|null}|null}){
   const now=new Date();
   const scopedProjects=selectedAdvertiser?allProjects.filter(p=>p.advertiserId===selectedAdvertiser):allProjects;
   const counts={
@@ -272,7 +294,7 @@ function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setS
     published:scopedProjects.filter(p=>p.status==='published').length,
     warnings:scopedProjects.reduce((n,p)=>n+(p.complianceIssues?.filter(x=>x.severity!=='info').length||0),0)
   };
-  return <div className="blog26-page"><PageHeader title="블로그 제작" description="광고주별 콘텐츠 제작부터 SEO·업종별 규정 검수·의료광고 심의 관리까지 한곳에서 진행합니다." action={<button className="btn primary" onClick={onCreate} disabled={!advertisers.length}><Plus size={15}/> 새 블로그 제작</button>}/>{notice&&<div className="blog26-notice">{notice}</div>}
+  return <div className="blog26-page"><PageHeader title="블로그 제작" description="광고주별 콘텐츠 제작부터 SEO·업종별 규정 검수·의료광고 심의 관리까지 한곳에서 진행합니다." action={<button className="btn primary" onClick={onCreate} disabled={!advertisers.length}><Plus size={15}/> 새 블로그 제작</button>}/><AutopostProStatusBanner aiStatus={aiStatus}/>{notice&&<div className="blog26-notice">{notice}</div>}
     {!advertisers.length?<section className="card blog26-zero"><Sparkles size={36}/><h2>아직 등록된 광고주가 없습니다.</h2><p>HOWTOM 유니버스는 샘플 데이터 없이 시작합니다. 광고주를 먼저 등록하면 블로그 제작 워크스페이스를 사용할 수 있습니다.</p><a className="btn primary" href={`${import.meta.env.VITE_UNIVERSE_URL || 'http://localhost:3000'}/advertisers`}><Plus size={15}/> 유니버스에서 광고주 등록</a></section>:<>
     <section className="blog26-kpis">{[['이번 달 제작',counts.month],['작성 중',counts.writing],['검토 필요',counts.review],['발행 완료',counts.published],['규정 경고',counts.warnings]].map(([label,value])=><article className="card" key={String(label)}><span>{label}</span><b>{value}</b></article>)}</section>
     <section className="card blog26-dashboard-toolbar"><div className="blog26-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="제목·키워드 검색"/></div><select value={selectedAdvertiser} onChange={e=>setSelectedAdvertiser(e.target.value)}><option value="">전체 광고주</option>{advertisers.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select><button className="btn primary" onClick={onCreate} disabled={!selectedAdvertiser}><Plus size={15}/> 새 글</button></section>

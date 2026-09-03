@@ -1455,6 +1455,22 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { configured: blogGenerationConfigured(), provider: autopostProConfigured() ? 'autopost-pro' : (blogGenerationConfigured() ? 'partner' : null) });
         }
 
+        // 환경변수가 "설정되어 있는지"와 "실제로 유효해서 API가 응답하는지"는 다른 문제라,
+        // 실제로 오토포스트 Pro 서버에 호출을 한 번 날려보고 결과를 그대로 보여줍니다.
+        if (req.method === 'GET' && pathname === '/api/blog/autopost-pro/test-connection') {
+          if (!autopostProConfigured()) return sendJson(res, 200, { connected: false, reason: 'AUTOPOST_PRO_API_KEY가 설정되어 있지 않습니다.' });
+          try {
+            await autopostProRequest('GET', '/v1/usage');
+            return sendJson(res, 200, { connected: true, reason: '정상적으로 연결되어 응답을 받았습니다.' });
+          } catch (error) {
+            const status = error?.status;
+            const reason = status === 401 || status === 403 ? 'API 키가 유효하지 않습니다(401/403). 발급받은 키가 정확한지 확인하세요.'
+              : status ? `오토포스트 Pro 서버가 오류를 반환했습니다(HTTP ${status}): ${error?.message || ''}`
+              : `오토포스트 Pro 서버에 연결하지 못했습니다: ${error?.message || error}`;
+            return sendJson(res, 200, { connected: false, reason, status: status || null });
+          }
+        }
+
         // ── 좌석(seat) 관리: 조회(GET)는 절대 새로 만들지 않고, 생성은 POST로만 ────
         if (req.method === 'GET' && pathname === '/api/blog/autopost-pro/seat') {
           if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });

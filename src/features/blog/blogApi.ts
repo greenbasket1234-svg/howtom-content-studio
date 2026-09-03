@@ -22,6 +22,7 @@ export const blogApi = {
     }
   },
   aiStatus: () => apiFetch<{ configured: boolean; provider: string | null }>('/api/blog/ai-status'),
+  testAutopostProConnection: () => apiFetch<{ connected: boolean; reason: string; status?: number | null }>('/api/blog/autopost-pro/test-connection'),
 
   // 좌석: GET은 조회만(없으면 404, 새로 안 만듦), POST가 실제 생성입니다.
   getAutopostProSeat: (advertiserId: string) => apiFetch<AutopostSeat & { noSeat?: boolean }>(`/api/blog/autopost-pro/seat?advertiserId=${encodeURIComponent(advertiserId)}`),
