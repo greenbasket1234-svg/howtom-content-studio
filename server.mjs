@@ -945,7 +945,9 @@ const server = http.createServer(async (req, res) => {
                  COALESCE(to_jsonb(a)->>'industry','') AS industry,
                  COALESCE(to_jsonb(a)->>'website','') AS website,
                  COALESCE(to_jsonb(a)->>'phone','') AS phone,
-                 COALESCE(to_jsonb(a)->>'address','') AS address
+                 COALESCE(to_jsonb(a)->>'address','') AS address,
+                 to_jsonb(a)->>'business_reg_no' AS business_reg_no,
+                 to_jsonb(a)->>'autopost_pro_industry' AS autopost_pro_industry
           FROM advertisers a WHERE a.tenant_id=$1 ORDER BY a.name
         `, [tenantId]);
         return sendJson(res, 200, result.rows);
@@ -1566,6 +1568,18 @@ const server = http.createServer(async (req, res) => {
           const idempotencyKey = cleanText(body.idempotencyKey || '', 100);
           if (!idempotencyKey) return sendJson(res, 400, { error: 'idempotencyKey가 필요합니다(중복 생성·중복 과금 방지용).' });
           const projectId = cleanText(body.projectId || '', 120);
+          if (!projectId) return sendJson(res, 400, { error: 'projectId가 필요합니다.' });
+
+          // 외부(과금 가능) API를 부르기 전에 반드시 먼저 확인합니다: 이 프로젝트가
+          // 실제로 존재하는가? 존재하지 않으면 여기서 즉시 404로 끝내고, 오토포스트 Pro는
+          // 아예 호출하지 않습니다 - 잘못된 projectId로 과금만 발생하고 저장은 안 되는
+          // 상황을 원천적으로 막습니다.
+          const projectRow = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+          if (!projectRow.rows.length) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
+          // advertiserId는 클라이언트가 보낸 값을 신뢰하지 않고, 이 프로젝트에 실제로
+          // 연결된 광고주로 항상 덮어씁니다 - 클라이언트 값과 프로젝트 소속 광고주가
+          // 달라도(또는 조작되어도) 항상 프로젝트의 진짜 광고주 기준으로만 과금·좌석이 결정됩니다.
+          const verifiedAdvertiserId = cleanText(projectRow.rows[0].data?.advertiserId || '', 120);
 
           // 이미 같은 키로 완전히 끝난 시도가 있으면 그 결과를 그대로 재사용합니다(재클릭·재요청 방지).
           const existing = await pgPool.query('SELECT * FROM blog_generation_requests WHERE idempotency_key=$1', [idempotencyKey]);
@@ -1582,7 +1596,7 @@ const server = http.createServer(async (req, res) => {
           } else {
             try {
               const brief = {
-                advertiserId: cleanText(body.advertiserId || '', 120),
+                advertiserId: verifiedAdvertiserId,
                 industry: cleanText(body.industry || '업종 무관', 60), platform: cleanText(body.platform || '블로그', 60),
                 primaryKeyword: keyword,
                 // 서브 키워드·지역·톤앤매너·참고자료는 오토포스트 Pro API 규격에 없는 필드라
@@ -1597,7 +1611,7 @@ const server = http.createServer(async (req, res) => {
                 `INSERT INTO blog_generation_requests (tenant_id, project_id, idempotency_key, provider_draft_id, status, billing, result)
                  VALUES ($1,$2,$3,$4,'ai_completed',$5,$6)
                  ON CONFLICT (idempotency_key) DO UPDATE SET status='ai_completed', billing=$5, result=$6, provider_draft_id=$4`,
-                [tenantId, projectId || null, idempotencyKey, genResult.providerDraftId || null, JSON.stringify(genResult.billing || null), JSON.stringify(genResult)]
+                [tenantId, projectId, idempotencyKey, genResult.providerDraftId || null, JSON.stringify(genResult.billing || null), JSON.stringify(genResult)]
               );
             } catch (error) {
               const status = error?.code === 'overage_confirm_required' ? 409 : (error?.status || 502);
@@ -1605,20 +1619,19 @@ const server = http.createServer(async (req, res) => {
             }
           }
 
-          // 생성된 내용을 프로젝트에 저장합니다. 이 저장이 실패해도 "생성 실패"가 아니라
-          // "생성은 끝났고(이미 과금됐을 수 있음) 저장만 재시도가 필요"한 상태입니다.
+          // 생성된 내용을 프로젝트에 저장합니다(위에서 이미 존재를 확인했으니 여기선 항상 있습니다).
+          // 이 저장이 실패해도 "생성 실패"가 아니라 "생성은 끝났고(이미 과금됐을 수 있음)
+          // 저장만 재시도가 필요"한 상태입니다.
           try {
-            if (projectId) {
-              const cur = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
-              if (cur.rows[0]) {
-                const updated = {
-                  ...cur.rows[0].data,
-                  titleOptions: genResult.titles, selectedTitle: genResult.titles[0] || '', blocks: genResult.blocks, status: 'writing',
-                  billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: genResult.metaDescription || '',
-                  updatedAt: new Date().toISOString(),
-                };
-                await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updated)]);
-              }
+            const cur = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+            if (cur.rows[0]) {
+              const updated = {
+                ...cur.rows[0].data,
+                titleOptions: genResult.titles, selectedTitle: genResult.titles[0] || '', blocks: genResult.blocks, status: 'writing',
+                billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: genResult.metaDescription || '',
+                updatedAt: new Date().toISOString(),
+              };
+              await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updated)]);
             }
             await pgPool.query(`UPDATE blog_generation_requests SET status='completed', completed_at=now() WHERE idempotency_key=$1`, [idempotencyKey]);
             return sendJson(res, 200, { ...genResult, idempotencyKey });
