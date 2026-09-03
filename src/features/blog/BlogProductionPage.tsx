@@ -58,7 +58,7 @@ export function BlogProductionPage(){
   const [selectedAdvertiser,setSelectedAdvertiser]=useState(()=>isAllSelected?'':globalAdvertiserId);
   const [style,setStyle]=useState<BlogStyleProfile|null>(null);
   const [assets,setAssets]=useState<BlogAsset[]>([]);
-  const [activeSide,setActiveSide]=useState<'seo'|'compliance'|'photos'|'advertiser'>('seo');
+  const [activeSide,setActiveSide]=useState<'seo'|'compliance'|'photos'>('seo');
   const [styleOpen,setStyleOpen]=useState(false);
   const [assetOpen,setAssetOpen]=useState(false);
   const [integrationOpen,setIntegrationOpen]=useState(false);
@@ -182,7 +182,6 @@ export function BlogProductionPage(){
     }catch(e){setNotice(e instanceof Error?e.message:'규정검수에 실패했습니다.');}
     finally{setComplianceChecking(false);}
   };
-  const runReview=async()=>{if(!project)return;const issues=analyzeCompliance(project);const score=analyzeBlogSeo(project).score;const ok=await patch({complianceIssues:issues,complianceStatus:issues.some(x=>x.severity==='danger')?'revision':'reviewed',seoScore:score,status:issues.some(x=>x.severity==='danger')?'revision':'review'});if(ok)setNotice(`사전점검 완료: ${issues.length}개 확인 항목이 있습니다.`);};
   const addBlock=(type:BlogBlockType)=>patchLocal({blocks:[...project!.blocks,{blockId:uid('block'),type,title:type==='h2'?'새 소제목':type==='faq'?'자주 묻는 질문':type==='cta'?'안내':'',text:''}]});
   const updateBlock=(id:string,change:Partial<BlogBlock>)=>patchLocal({blocks:project!.blocks.map(b=>b.blockId===id?{...b,...change}:b)});
   const removeBlock=(id:string)=>patchLocal({blocks:project!.blocks.filter(b=>b.blockId!==id)});
@@ -271,15 +270,15 @@ export function BlogProductionPage(){
           <header><span>{BLOCK_LABEL[block.type]}</span>{!project.medicalReview.locked&&<button className="icon-btn danger" onClick={()=>removeBlock(block.blockId)}><Trash2 size={14}/></button>}</header>
           {block.type==='divider'?<hr/>:block.type==='html'?<HtmlBlockEditor block={block} locked={project.medicalReview.locked} onChange={change=>updateBlock(block.blockId,change)}/>:<>{block.type==='image'&&<div className="blog26-image-block">{block.assetId?(()=>{const a=assets.find(x=>x.assetId===block.assetId);return <><ImageIcon size={24}/><b>{a?.name||block.assetId}</b><span>{a?.url||'서버 자산'}</span></>})():<><ImageIcon size={24}/><span>사진을 연결하세요.</span></>}<button className="btn secondary" onClick={()=>{setActiveSide('photos');setAssetOpen(true)}} disabled={project.medicalReview.locked}>사진 선택</button></div>}<input value={block.title||''} onChange={e=>updateBlock(block.blockId,{title:e.target.value})} placeholder="블록 제목" disabled={project.medicalReview.locked}/>{block.type!=='image'&&<textarea rows={block.type==='paragraph'?7:4} value={block.text||''} onChange={e=>updateBlock(block.blockId,{text:e.target.value})} placeholder="내용을 입력하세요." disabled={project.medicalReview.locked}/>}</>}
         </article>)}</div>
-        <div className="blog26-editor-actions"><button className="btn secondary" onClick={()=>navigator.clipboard.writeText(`${project.selectedTitle}\n\n${project.blocks.map(b=>`${b.title||''}\n${b.text||''}`).join('\n\n')}`)}><ClipboardCopy size={15}/> 전체 복사</button><button className="btn secondary" onClick={()=>void runReview()} title="서버 호출 없이 즉시 실행되는 HOWTOM 자체 규칙 검사입니다. 오토포스트 Pro의 실제 규정검수와는 별개입니다."><ShieldCheck size={15}/> HOWTOM 자체 사전점검</button><button className="btn primary" onClick={()=>void save()}><Save size={15}/> 저장</button></div>
+        <div className="blog26-editor-actions"><button className="btn secondary" onClick={()=>navigator.clipboard.writeText(`${project.selectedTitle}\n\n${project.blocks.map(b=>`${b.title||''}\n${b.text||''}`).join('\n\n')}`)}><ClipboardCopy size={15}/> 전체 복사</button><button className="btn primary" onClick={()=>void save()}><Save size={15}/> 저장</button></div>
       </main>
 
       <aside className="blog26-review card">
-        <div className="blog26-side-tabs"><button className={activeSide==='seo'?'active':''} onClick={()=>setActiveSide('seo')}>SEO</button><button className={activeSide==='compliance'?'active':''} onClick={()=>setActiveSide('compliance')}>규정검수</button><button className={activeSide==='photos'?'active':''} onClick={()=>setActiveSide('photos')}>사진</button><button className={activeSide==='advertiser'?'active':''} onClick={()=>setActiveSide('advertiser')}>{aiStatus?.provider==='autopost-pro'?'오토포스트':'광고주'}</button></div>
+        <div className="blog26-side-tabs"><button className={activeSide==='seo'?'active':''} onClick={()=>setActiveSide('seo')}>SEO</button><button className={activeSide==='compliance'?'active':''} onClick={()=>setActiveSide('compliance')}>규정검수</button><button className={activeSide==='photos'?'active':''} onClick={()=>setActiveSide('photos')}>사진</button></div>
         {activeSide==='seo'&&<SeoPanel seo={seo}/>} 
         {activeSide==='compliance'&&<CompliancePanel project={project} issues={compliance} onPatch={patch} onLock={lockApproved} onUnlock={unlock}/>} 
         {activeSide==='photos'&&<PhotoPanel assets={suggestedAssets} project={project} onAttach={attachAsset} onRegister={()=>setAssetOpen(true)}/>} 
-        {activeSide==='advertiser'&&(aiStatus?.provider==='autopost-pro'?<AutopostProPanel project={project} advertiser={currentAdvertiser??null} seat={autopostSeat} industryCode={advertiserAutopostCode}/>:<AdvertiserPanel style={style} onEdit={()=>setStyleOpen(true)} project={project} advertiser={advertiserInfo}/>)} 
+
       </aside>
     </div>
     {styleOpen&&style&&<StyleModal profile={style} onClose={()=>setStyleOpen(false)} onSave={async next=>{const saved=await blogApi.saveStyle(project.advertiserId,next);setStyle(saved);setStyleOpen(false);setNotice('광고주 문체 프로필을 서버에 저장했습니다.');}}/>}
