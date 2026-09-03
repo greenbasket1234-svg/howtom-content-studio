@@ -273,13 +273,6 @@ export function BlogProductionPage(){
         <div className="blog26-editor-actions"><button className="btn secondary" onClick={()=>navigator.clipboard.writeText(`${project.selectedTitle}\n\n${project.blocks.map(b=>`${b.title||''}\n${b.text||''}`).join('\n\n')}`)}><ClipboardCopy size={15}/> 전체 복사</button><button className="btn primary" onClick={()=>void save()}><Save size={15}/> 저장</button></div>
       </main>
 
-      <aside className="blog26-review card">
-        <div className="blog26-side-tabs"><button className={activeSide==='seo'?'active':''} onClick={()=>setActiveSide('seo')}>SEO</button><button className={activeSide==='compliance'?'active':''} onClick={()=>setActiveSide('compliance')}>규정검수</button><button className={activeSide==='photos'?'active':''} onClick={()=>setActiveSide('photos')}>사진</button></div>
-        {activeSide==='seo'&&<SeoPanel seo={seo}/>} 
-        {activeSide==='compliance'&&<CompliancePanel project={project} issues={compliance} onPatch={patch} onLock={lockApproved} onUnlock={unlock}/>} 
-        {activeSide==='photos'&&<PhotoPanel assets={suggestedAssets} project={project} onAttach={attachAsset} onRegister={()=>setAssetOpen(true)}/>} 
-
-      </aside>
     </div>
     {styleOpen&&style&&<StyleModal profile={style} onClose={()=>setStyleOpen(false)} onSave={async next=>{const saved=await blogApi.saveStyle(project.advertiserId,next);setStyle(saved);setStyleOpen(false);setNotice('광고주 문체 프로필을 서버에 저장했습니다.');}}/>}
     {assetOpen&&<AssetModal advertiserId={project.advertiserId} assets={advertiserAssets} imageBlocks={project.blocks.filter(b=>b.type==='image')} onClose={()=>setAssetOpen(false)} onAttach={(blockId,assetId)=>{attachAsset(blockId,assetId);setAssetOpen(false)}} onAdded={a=>setAssets(rows=>[a,...rows])}/>}
