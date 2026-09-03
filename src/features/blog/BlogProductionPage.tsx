@@ -275,11 +275,11 @@ export function BlogProductionPage(){
       </main>
 
       <aside className="blog26-review card">
-        <div className="blog26-side-tabs"><button className={activeSide==='seo'?'active':''} onClick={()=>setActiveSide('seo')}>SEO</button><button className={activeSide==='compliance'?'active':''} onClick={()=>setActiveSide('compliance')}>규정검수</button><button className={activeSide==='photos'?'active':''} onClick={()=>setActiveSide('photos')}>사진</button><button className={activeSide==='advertiser'?'active':''} onClick={()=>setActiveSide('advertiser')}>광고주</button></div>
+        <div className="blog26-side-tabs"><button className={activeSide==='seo'?'active':''} onClick={()=>setActiveSide('seo')}>SEO</button><button className={activeSide==='compliance'?'active':''} onClick={()=>setActiveSide('compliance')}>규정검수</button><button className={activeSide==='photos'?'active':''} onClick={()=>setActiveSide('photos')}>사진</button><button className={activeSide==='advertiser'?'active':''} onClick={()=>setActiveSide('advertiser')}>{aiStatus?.provider==='autopost-pro'?'오토포스트':'광고주'}</button></div>
         {activeSide==='seo'&&<SeoPanel seo={seo}/>} 
         {activeSide==='compliance'&&<CompliancePanel project={project} issues={compliance} onPatch={patch} onLock={lockApproved} onUnlock={unlock}/>} 
         {activeSide==='photos'&&<PhotoPanel assets={suggestedAssets} project={project} onAttach={attachAsset} onRegister={()=>setAssetOpen(true)}/>} 
-        {activeSide==='advertiser'&&<AdvertiserPanel style={style} onEdit={()=>setStyleOpen(true)} project={project} advertiser={advertiserInfo}/>} 
+        {activeSide==='advertiser'&&(aiStatus?.provider==='autopost-pro'?<AutopostProPanel project={project} advertiser={currentAdvertiser??null} seat={autopostSeat} industryCode={advertiserAutopostCode}/>:<AdvertiserPanel style={style} onEdit={()=>setStyleOpen(true)} project={project} advertiser={advertiserInfo}/>)} 
       </aside>
     </div>
     {styleOpen&&style&&<StyleModal profile={style} onClose={()=>setStyleOpen(false)} onSave={async next=>{const saved=await blogApi.saveStyle(project.advertiserId,next);setStyle(saved);setStyleOpen(false);setNotice('광고주 문체 프로필을 서버에 저장했습니다.');}}/>}
@@ -385,6 +385,21 @@ function HtmlBlockEditor({block,locked,onChange}:{block:BlogBlock;locked:boolean
       ? <div className="blog26-html-preview" dangerouslySetInnerHTML={{__html:sanitizeHtml(block.text||'')}}/>
       : <textarea rows={14} className="blog26-html-source" value={block.text||''} onChange={e=>onChange({text:e.target.value})} placeholder="HTML 소스" disabled={locked}/>}
   </div>;
+}
+function AutopostProPanel({project,advertiser,seat,industryCode}:{project:BlogProject;advertiser:ReturnType<typeof useAdvertisers>[0][number]|null;seat:{plan:'trial'|'paid';trial_remaining?:number;status:string}|null;industryCode:string}){
+  const billingLabel=!project.billing?'아직 생성 이력 없음':!project.billing.billable?'무료 체험':project.billing.overage?'유료 · 월 한도 초과':'유료 · 기본 제공량';
+  return <section className="blog26-side-section">
+    <div className="blog26-side-head"><div><b>오토포스트 Pro 정보</b><span>{project.advertiserName}</span></div></div>
+    <div className="blog26-info-list">
+      <div><span>업종 코드</span><b>{industryCode||'미확인'}</b></div>
+      <div><span>사업자등록번호</span><b>{advertiser?.business_reg_no||'미등록'}</b></div>
+      <div><span>좌석 플랜</span><b>{seat?seat.plan==='trial'?'무료체험':'유료':'좌석 없음(첫 생성 시 자동 생성)'}</b></div>
+      {seat?.plan==='trial'&&<div><span>무료체험 잔여</span><b>{seat.trial_remaining??'-'}건</b></div>}
+      {seat&&<div><span>좌석 상태</span><b>{seat.status==='active'?'정상':seat.status}</b></div>}
+      <div><span>이번 생성 과금</span><b>{billingLabel}</b></div>
+    </div>
+    <p className="blog26-muted">톤앤매너·문체 규칙 등 HOWTOM 자체 스타일 설정은 오토포스트 Pro API에는 반영되지 않아 여기서는 표시하지 않습니다.</p>
+  </section>;
 }
 function AdvertiserPanel({style,onEdit,project,advertiser}:{style:BlogStyleProfile|null;onEdit:()=>void;project:BlogProject;advertiser:ReturnType<typeof useAdvertisers>[0][number]|null}){return <section className="blog26-side-section"><div className="blog26-side-head"><div><b>광고주 정보·문체</b><span>{project.advertiserName}</span></div><button className="btn secondary mini" onClick={onEdit}>문체 편집</button></div><div className="blog26-info-list"><div><span>업종</span><b>{advertiser?.industry||project.industry||'미설정'}</b></div><div><span>전화번호</span><b>{advertiser?.phone||'미설정'}</b></div><div><span>주소</span><b>{advertiser?.address||'미설정'}</b></div><div><span>홈페이지</span><b>{advertiser?.website||'미설정'}</b></div><div><span>톤앤매너</span><b>{style?.tone||'미설정'}</b></div><div><span>문체 규칙</span><b>{style?.rules.length||0}개</b></div><div><span>선호 표현</span><b>{style?.preferredPhrases.length||0}개</b></div><div><span>금지 표현</span><b>{style?.prohibitedPhrases.length||0}개</b></div><div><span>기본 CTA</span><b>{style?.cta||'미설정'}</b></div><div><span>학습 참고 원문</span><b>{style?.sourceTexts.length||0}개</b></div></div><p className="blog26-muted">광고주 기본 정보와 문체 프로필을 콘텐츠 생성·검수의 컨텍스트로 사용합니다.</p></section>}
 
