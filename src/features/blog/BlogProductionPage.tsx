@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -31,12 +32,10 @@ const LENGTH_OPTIONS:{value:'short'|'medium'|'long'|'auto';label:string;targetLe
 ];
 /** 간단한 HTML 새니타이즈 - 스크립트·이벤트 핸들러·javascript: 링크를 제거합니다.
  * 오토포스트 Pro가 만든 HTML을 화면에 그대로 렌더링하기 전에 거칩니다. */
+/** dangerouslySetInnerHTML로 렌더링하기 전에 거치는 새니타이즈입니다. 정규식만으로는
+ * 우회 가능한 패턴이 많아, 검증된 라이브러리(DOMPurify)를 씁니다. */
 function sanitizeHtml(html:string):string{
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi,'')
-    .replace(/<style[\s\S]*?<\/style>/gi,'')
-    .replace(/\son\w+="[^"]*"/gi,'').replace(/\son\w+='[^']*'/gi,'')
-    .replace(/href\s*=\s*["']javascript:[^"']*["']/gi,'href="#"');
+  return DOMPurify.sanitize(html,{ADD_ATTR:['target']});
 }
 /** TXT 내보내기용 - HTML 태그를 전부 제거하고 텍스트만 남깁니다. */
 function stripHtml(html:string):string{
@@ -87,7 +86,7 @@ export function BlogProductionPage(){
     setLoading(true);
     try{
       const [ps,assetRows]=await Promise.all([blogApi.projects(),blogApi.assets()]); setProjects(ps);setAssets(assetRows);
-      if(projectId){const p=ps.find(x=>x.projectId===projectId)||await blogApi.getProject(projectId);setProject(p);setSelectedAdvertiser(p.advertiserId);}else setProject(null);
+      if(projectId){const p=ps.find(x=>x.projectId===projectId)||await blogApi.getProject(projectId);setProject(p);setSelectedAdvertiser(p.advertiserId);setAutopostCompliance(p.autopostCompliance??null);}else{setProject(null);setAutopostCompliance(null);}
     }catch(e){setNotice(e instanceof Error?e.message:'블로그 데이터를 불러오지 못했습니다.');}
     finally{setLoading(false);}
   };
@@ -119,13 +118,21 @@ export function BlogProductionPage(){
     try{const row=await blogApi.createProject({advertiserId:adv.id,advertiserName:adv.name,industry:adv.industry||'일반 서비스업'});setParams({project:row.projectId});}
     catch(e){setNotice(e instanceof Error?e.message:'새 글을 만들지 못했습니다.');}
   };
-  const patch=async(changes:Partial<BlogProject>&{unlockForRevision?:boolean})=>{
-    if(!project)return;
-    try{const next=await blogApi.patchProject(project.projectId,changes);setProject(next);setProjects(rows=>rows.map(x=>x.projectId===next.projectId?next:x));}
-    catch(e){setNotice(e instanceof Error?e.message:'저장하지 못했습니다.');}
+  const patch=async(changes:Partial<BlogProject>&{unlockForRevision?:boolean}):Promise<boolean>=>{
+    if(!project)return false;
+    try{const next=await blogApi.patchProject(project.projectId,changes);setProject(next);setProjects(rows=>rows.map(x=>x.projectId===next.projectId?next:x));return true;}
+    catch(e){setNotice(e instanceof Error?e.message:'저장하지 못했습니다.');return false;}
   };
-  const patchLocal=(changes:Partial<BlogProject>)=>project&&setProject({...project,...changes});
-  const save=async()=>{if(!project)return;const body=project.medicalReview.locked?{status:project.status,publishStatus:project.publishStatus,medicalReview:project.medicalReview,seoScore:project.seoScore,complianceStatus:project.complianceStatus,complianceIssues:project.complianceIssues}:project;await patch(body);setNotice('서버에 저장했습니다.');};
+  const patchLocal=(changes:Partial<BlogProject>)=>{
+    if(!project)return;
+    // 본문(blocks)이 바뀌면 이전 규정검수 결과는 더 이상 지금 본문을 반영하지 않으므로
+    // 화면 표시와 저장될 값 모두 지웁니다 - 오래된 "통과" 결과가 새 본문에도 그대로
+    // 남아있는 걸 막습니다.
+    const invalidateCompliance='blocks' in changes;
+    if(invalidateCompliance)setAutopostCompliance(null);
+    setProject({...project,...changes,...(invalidateCompliance?{autopostCompliance:null}:{})});
+  };
+  const save=async()=>{if(!project)return;const body=project.medicalReview.locked?{status:project.status,publishStatus:project.publishStatus,medicalReview:project.medicalReview,seoScore:project.seoScore,complianceStatus:project.complianceStatus,complianceIssues:project.complianceIssues}:project;const ok=await patch(body);if(ok)setNotice('서버에 저장했습니다.');};
   const generate=async(confirmOverage=false)=>{
     if(!project?.primaryKeyword){setNotice('메인 키워드를 먼저 입력하세요.');return;}
     // Idempotency-Key는 "이 생성 시도" 전체에서 하나만 씁니다. 재시도(과금 초과 동의 후
@@ -136,9 +143,13 @@ export function BlogProductionPage(){
     setOverageConfirm(null);setGenerating(true);
     try{
       const result=await blogApi.generate({...project,confirmOverage,idempotencyKey,length:lengthChoice,numImages});
-      const next={...project,titleOptions:result.titles,selectedTitle:result.titles[0]||'',blocks:result.blocks,status:'writing' as const,billing:result.billing||null,providerDraftId:result.providerDraftId||null,tags:result.tags||[],metaDescription:result.metaDescription||''};
+      const next={...project,titleOptions:result.titles,selectedTitle:result.titles[0]||'',blocks:result.blocks,status:'writing' as const,billing:result.billing||null,providerDraftId:result.providerDraftId||null,tags:result.tags||[],metaDescription:result.metaDescription||'',autopostCompliance:null};
       setProject(next);
-      setPendingIdempotencyKey(null); // 이 시도는 여기서 완전히 끝났으니 다음 클릭은 새 시도로 취급합니다.
+      setAutopostCompliance(null); // 새로 생성된 본문은 아직 검수를 안 거쳤으니 이전 결과를 지웁니다.
+      // 저장까지 완전히 끝난 경우에만 키를 지웁니다. saveWarning이 있으면(외부 생성은
+      // 끝났지만 HOWTOM 저장은 실패한 상태) 키를 그대로 남겨둬서, 사용자가 다시 눌러도
+      // 외부 API를 또 호출하지 않고 저장만 재시도하도록 합니다.
+      if(!result.saveWarning)setPendingIdempotencyKey(null);
       const message=
         result.saveWarning?result.saveWarning
         :result.replayed?'이전 생성 결과를 다시 불러왔습니다(중복 생성되지 않았습니다).'
@@ -160,23 +171,24 @@ export function BlogProductionPage(){
     if(!project)return;
     setComplianceChecking(true);
     try{
-      const industryCode=({'병원·의료기관':'medical','치과':'medical','한의원':'medical','동물병원':'vet','세무사·세무법인':'tax','학원·교육':'academy'} as Record<string,string>)[project.industry]||'';
+      const industryCode=advertiserAutopostCode;
       if(!industryCode){setNotice("이 업종은 오토포스트 Pro 규정검수를 지원하지 않습니다(병원·치과·한의원·동물병원·세무·학원만 가능).");return;}
       const plainText=stripHtml(project.blocks.map(b=>b.type==='html'?(b.text||''):`${b.title||''}\n${b.text||''}`).join('\n\n'));
       const result=await blogApi.autopostCompliance({industry:industryCode,text:plainText,orgName:project.advertiserName,projectId:project.projectId});
       setAutopostCompliance(result);
-      await patch({autopostCompliance:result});
-      setNotice(result.passed?'오토포스트 규정검수를 통과했습니다.':`오토포스트 규정검수에서 ${result.issues.length}건이 확인됐습니다.`);
+      const saved=await patch({autopostCompliance:result});
+      const base=result.passed?'오토포스트 규정검수를 통과했습니다.':`오토포스트 규정검수에서 ${result.issues.length}건이 확인됐습니다.`;
+      setNotice(saved?base:`${base} (결과 저장에는 실패했습니다 - 새로고침하면 이 결과가 사라질 수 있습니다)`);
     }catch(e){setNotice(e instanceof Error?e.message:'규정검수에 실패했습니다.');}
     finally{setComplianceChecking(false);}
   };
-  const runReview=async()=>{if(!project)return;const issues=analyzeCompliance(project);const score=analyzeBlogSeo(project).score;await patch({complianceIssues:issues,complianceStatus:issues.some(x=>x.severity==='danger')?'revision':'reviewed',seoScore:score,status:issues.some(x=>x.severity==='danger')?'revision':'review'});setNotice(`사전점검 완료: ${issues.length}개 확인 항목이 있습니다.`);};
+  const runReview=async()=>{if(!project)return;const issues=analyzeCompliance(project);const score=analyzeBlogSeo(project).score;const ok=await patch({complianceIssues:issues,complianceStatus:issues.some(x=>x.severity==='danger')?'revision':'reviewed',seoScore:score,status:issues.some(x=>x.severity==='danger')?'revision':'review'});if(ok)setNotice(`사전점검 완료: ${issues.length}개 확인 항목이 있습니다.`);};
   const addBlock=(type:BlogBlockType)=>patchLocal({blocks:[...project!.blocks,{blockId:uid('block'),type,title:type==='h2'?'새 소제목':type==='faq'?'자주 묻는 질문':type==='cta'?'안내':'',text:''}]});
   const updateBlock=(id:string,change:Partial<BlogBlock>)=>patchLocal({blocks:project!.blocks.map(b=>b.blockId===id?{...b,...change}:b)});
   const removeBlock=(id:string)=>patchLocal({blocks:project!.blocks.filter(b=>b.blockId!==id)});
   const attachAsset=(blockId:string,assetId:string)=>{updateBlock(blockId,{assetId});setActiveSide('photos');};
-  const unlock=async()=>{if(!project)return;await patch({unlockForRevision:true,medicalReview:{...project.medicalReview,locked:false,status:'revision-requested'},status:'revision'});setNotice('문안 잠금을 해제하고 재검토 상태로 전환했습니다.');};
-  const lockApproved=async()=>{if(!project)return;await patch({medicalReview:{...project.medicalReview,status:'approved',locked:true,reviewedAt:project.medicalReview.reviewedAt||new Date().toISOString()},status:'approved'});setNotice('심의 완료 문안을 잠갔습니다.');};
+  const unlock=async()=>{if(!project)return;const ok=await patch({unlockForRevision:true,medicalReview:{...project.medicalReview,locked:false,status:'revision-requested'},status:'revision'});if(ok)setNotice('문안 잠금을 해제하고 재검토 상태로 전환했습니다.');};
+  const lockApproved=async()=>{if(!project)return;const ok=await patch({medicalReview:{...project.medicalReview,status:'approved',locked:true,reviewedAt:project.medicalReview.reviewedAt||new Date().toISOString()},status:'approved'});if(ok)setNotice('심의 완료 문안을 잠갔습니다.');};
   const deleteProject=async(id:string)=>{const target=projects.find(x=>x.projectId===id);if(!window.confirm(`“${target?.selectedTitle||target?.primaryKeyword||'제목 미정'}” 글을 삭제할까요?`))return;try{await blogApi.deleteProject(id);setProjects(rows=>rows.filter(x=>x.projectId!==id));if(project?.projectId===id)setParams({});setNotice('블로그 글을 삭제했습니다.');}catch(e){setNotice(e instanceof Error?e.message:'삭제하지 못했습니다.');}};
   const exportFile=(kind:'html'|'txt')=>{if(!project)return;const body=project.blocks.map(b=>b.type==='html'?stripHtml(b.text||''):`${b.title||''}\n${b.text||''}`).join('\n\n');const html=`<!doctype html><html lang="ko"><meta charset="utf-8"><title>${project.selectedTitle}</title><body><h1>${project.selectedTitle}</h1>${project.blocks.map(b=>b.type==='html'?sanitizeHtml(b.text||''):b.type==='h2'?`<h2>${b.title}</h2><p>${b.text||''}</p>`:b.type==='h3'?`<h3>${b.title}</h3><p>${b.text||''}</p>`:b.type==='divider'?'<hr>':`<section><strong>${b.title||''}</strong><p>${(b.text||'').replace(/\n/g,'<br>')}</p></section>`).join('')}</body></html>`;const value=kind==='html'?html:`${project.selectedTitle}\n\n${body}`;const blob=new Blob([value],{type:kind==='html'?'text/html;charset=utf-8':'text/plain;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${project.selectedTitle||'blog'}.${kind}`;a.click();URL.revokeObjectURL(url);};
 
@@ -184,8 +196,15 @@ export function BlogProductionPage(){
   if(!project)return <BlogDashboard advertisers={advertisers} projects={filtered} allProjects={projects} selectedAdvertiser={selectedAdvertiser} setSelectedAdvertiser={setSelectedAdvertiser} query={query} setQuery={setQuery} onCreate={create} onOpen={id=>setParams({project:id})} onDelete={deleteProject} notice={notice} aiStatus={aiStatus}/>;
 
   const medical=isMedicalIndustry(project.industry);
+  // 서버(mapIndustryToAutopostCode)와 정확히 같은 매핑 기준을 씁니다 - project.industry는
+  // 블로그 프로젝트 화면에서 사용자가 자유롭게 바꿀 수 있는 값이라 광고주의 실제 등록
+  // 정보(advertiser.industry/autopost_pro_industry)와 어긋날 수 있습니다. 화면에서
+  // "가능"으로 보이는데 서버는 거부하는 상황을 막기 위해, 판정 기준을 광고주 레코드로 통일합니다.
   const AUTOPOST_SUPPORTED_INDUSTRIES:Record<string,string>={'병원·의료기관':'medical','치과':'medical','한의원':'medical','동물병원':'vet','세무사·세무법인':'tax','학원·교육':'academy'};
-  const autopostIndustrySupported=aiStatus?.provider!=='autopost-pro'||Boolean(AUTOPOST_SUPPORTED_INDUSTRIES[project.industry]);
+  const currentAdvertiser=advertisers.find(a=>a.id===project.advertiserId);
+  const advertiserAutopostCode=currentAdvertiser?.autopost_pro_industry||(currentAdvertiser?.industry?AUTOPOST_SUPPORTED_INDUSTRIES[currentAdvertiser.industry]:undefined)||'';
+  const autopostIndustrySupported=aiStatus?.provider!=='autopost-pro'||Boolean(advertiserAutopostCode);
+  const autopostMissingBizNo=aiStatus?.provider==='autopost-pro'&&!currentAdvertiser?.business_reg_no;
   return <div className="blog26-page">
     <PageHeader title="블로그 제작" description="광고주 정보·문체·자산·SEO·업종별 규정 검수를 한 워크스페이스에서 관리합니다." action={<div className="blog26-head-actions"><button className="btn secondary" onClick={()=>setParams({})}><ChevronLeft size={15}/> 목록</button><button className="btn secondary" onClick={()=>exportFile('txt')}><FileDown size={15}/> TXT</button><button className="btn secondary" onClick={()=>exportFile('html')}><FileDown size={15}/> HTML</button><button className="btn secondary" onClick={()=>setIntegrationOpen(true)}><Link2 size={15}/> 외부 연동</button>{integration&&<button className="btn secondary" onClick={()=>void sendExternal()}><ExternalLink size={15}/> 외부 업체로 보내기</button>}<button className="btn primary" onClick={()=>void save()}><Save size={15}/> 서버 저장</button></div>}/>
     <AutopostProStatusBanner aiStatus={aiStatus}/>
@@ -218,14 +237,16 @@ export function BlogProductionPage(){
           {medical&&<label className="medical"><input type="checkbox" checked={project.options.medical} onChange={e=>patchLocal({options:{...project.options,medical:e.target.checked}})}/> 의료광고 사전점검</label>}
         </div>
         {!autopostIndustrySupported&&<div className="blog26-usage-warn" style={{marginBottom:8}}>현재 오토포스트 Pro 블로그 생성이 지원되지 않는 업종입니다. (병원·치과·한의원·동물병원·세무·학원만 지원)</div>}
-        <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured||generating||!autopostIndustrySupported}>{generating?<>생성 중... (잠시만요)</>:<><Sparkles size={16}/> 초안 만들기</>}</button>
+        {autopostIndustrySupported&&autopostMissingBizNo&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이 광고주는 사업자등록번호가 등록되어 있지 않습니다. HOWTOM Universe의 광고주 정보에서 먼저 입력하세요.</div>}
+        {pendingIdempotencyKey&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 생성이 완료됐지만 저장에 실패했습니다(이미 과금됐을 수 있음). 아래 버튼은 재생성하지 않고 저장만 다시 시도합니다.</div>}
+        <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured||generating||!autopostIndustrySupported||autopostMissingBizNo}>{generating?<>{pendingIdempotencyKey?'저장 재시도 중...':'생성 중... (잠시만요)'}</>:pendingIdempotencyKey?<><Save size={16}/> 저장만 다시 시도</>:<><Sparkles size={16}/> 초안 만들기</>}</button>
         <small className="blog26-help">{aiStatus?.provider==='autopost-pro'?'오토포스트 Pro가 업종별 규정을 반영해 초안을 작성합니다.':aiStatus?.configured?'제휴 업체 AI가 초안을 작성합니다.':'블로그 AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결됩니다(연동 필요). 현재는 직접 작성·편집·저장 기능을 사용하세요.'}</small>
         {aiStatus?.provider==='autopost-pro'&&autopostSeat&&<div className="blog26-usage-box">
           {autopostSeat.plan==='trial'?<span>무료 체험 <b>{autopostSeat.trial_remaining ?? '-'}</b>건 남음</span>:<span>유료 플랜 사용 중</span>}
           {autopostSeat.status!=='active'&&<span className="blog26-usage-warn"> · 좌석이 {autopostSeat.status==='suspended'?'정지':autopostSeat.status} 상태입니다</span>}
         </div>}
         {project.billing&&<div className="blog26-usage-box">
-          <span>이번 생성: {project.billing.billable?'유료(기본 제공량 초과분)':'기본 제공량'}</span>
+          <span>이번 생성: {!project.billing.billable?'무료 체험':project.billing.overage?'유료 플랜 · 월 한도 초과 추가 과금':'유료 플랜 · 기본 제공량'}</span>
           <span> · 이번 달 사용량 {project.billing.quota_used} / {project.billing.quota_limit}건</span>
           {project.billing.overage&&<span className="blog26-usage-warn"> · 초과 과금 {project.billing.overage_price_krw.toLocaleString()}원 청구됨</span>}
         </div>}
@@ -276,12 +297,19 @@ function AutopostProStatusBanner({aiStatus}:{aiStatus:{configured:boolean;provid
   };
   if(aiStatus===null)return null;
   const configured=aiStatus.provider==='autopost-pro';
-  return <div className={`blog26-autopost-status ${configured?'on':'off'}`}>
-    <div><b>{configured?'✅ 오토포스트 Pro 연결됨':'⚠️ 오토포스트 Pro 미연결'}</b>
-      <span>{configured?'AUTOPOST_PRO_API_KEY가 설정되어 있습니다.':'AUTOPOST_PRO_API_KEY가 설정되어 있지 않습니다. Railway 환경변수에 추가한 뒤 재배포하세요.'}</span>
-    </div>
+  // "키가 설정되어 있다"와 "실제로 연결이 된다"는 다른 이야기입니다 - 실시간 테스트를
+  // 통과하기 전까지는 "연결됨"이라고 단정하지 않고 "설정됨"으로만 표시합니다.
+  const verified=testResult?.connected===true;
+  const failed=testResult?.connected===false;
+  const tone=!configured?'off':verified?'on':failed?'fail':'unverified';
+  const title=!configured?'⚠️ 오토포스트 Pro 미연결':verified?'✅ 오토포스트 Pro 연결 정상':failed?'❌ 오토포스트 Pro 연결 실패':'🔑 오토포스트 Pro API 키 설정됨(연결 미확인)';
+  const desc=!configured?'AUTOPOST_PRO_API_KEY가 설정되어 있지 않습니다. Railway 환경변수에 추가한 뒤 재배포하세요.'
+    :verified?'실시간 연동 테스트를 통과했습니다.'
+    :failed?testResult!.reason
+    :'API 키는 설정되어 있지만 아직 실제로 연결해보진 않았습니다. "실시간 연동 테스트"를 눌러 확인하세요.';
+  return <div className={`blog26-autopost-status ${tone}`}>
+    <div><b>{title}</b><span>{desc}</span></div>
     {configured&&<button type="button" className="btn secondary mini" onClick={()=>void runTest()} disabled={testing}>{testing?'테스트 중...':'실시간 연동 테스트'}</button>}
-    {testResult&&<div className={`blog26-autopost-testresult ${testResult.connected?'ok':'fail'}`}>{testResult.connected?'✓':'✗'} {testResult.reason}</div>}
   </div>;
 }
 function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setSelectedAdvertiser,query,setQuery,onCreate,onOpen,onDelete,notice,aiStatus}:{advertisers:ReturnType<typeof useAdvertisers>[0];projects:BlogProject[];allProjects:BlogProject[];selectedAdvertiser:string;setSelectedAdvertiser:(v:string)=>void;query:string;setQuery:(v:string)=>void;onCreate:()=>void;onOpen:(id:string)=>void;onDelete:(id:string)=>void;notice:string;aiStatus:{configured:boolean;provider:string|null}|null}){
@@ -334,7 +362,7 @@ function BlogCalendar({projects,onOpen}:{projects:BlogProject[];onOpen:(id:strin
 }
 
 function SeoPanel({seo}:{seo:ReturnType<typeof analyzeBlogSeo>|null}){return <section className="blog26-side-section"><div className="blog26-score"><strong>{seo?.score||0}</strong><span>/100</span></div><p className="blog26-muted">검색 순위 예측이 아닌 HOWTOM 내부 작성 기준 충족도입니다.</p><div className="blog26-check-list">{seo?.checks.map(c=><div key={c.label} className={c.ok?'ok':''}><span>{c.ok?'✓':'○'}</span><b>{c.label}</b></div>)}</div><div className="blog26-mini-stat"><span>본문 길이</span><b>{seo?.length.toLocaleString()||0}자</b></div><div className="blog26-mini-stat"><span>키워드 반복</span><b>{seo?.keywordCount||0}회</b></div></section>}
-function CompliancePanel({project,issues,onPatch,onLock,onUnlock}:{project:BlogProject;issues:ReturnType<typeof analyzeCompliance>;onPatch:(p:Partial<BlogProject>&{unlockForRevision?:boolean})=>Promise<void>;onLock:()=>Promise<void>;onUnlock:()=>Promise<void>}){
+function CompliancePanel({project,issues,onPatch,onLock,onUnlock}:{project:BlogProject;issues:ReturnType<typeof analyzeCompliance>;onPatch:(p:Partial<BlogProject>&{unlockForRevision?:boolean})=>Promise<boolean>;onLock:()=>Promise<void>;onUnlock:()=>Promise<void>}){
   const medical=isMedicalIndustry(project.industry);
   return <section className="blog26-side-section"><div className="blog26-compliance-summary"><ShieldCheck size={22}/><div><b>업종별 사전점검</b><span>{issues.filter(x=>x.severity==='danger').length}개 위험 · {issues.filter(x=>x.severity==='warning').length}개 주의 · {issues.filter(x=>x.severity==='info').length}개 확인</span></div></div><p className="blog26-muted">법률 자문이나 공식 심의를 대체하지 않는 내부 사전점검입니다.</p><div className="blog26-issue-list">{issues.map(issue=><button key={issue.id} className={`blog26-issue ${issue.severity}`} onClick={()=>issue.blockId&&document.getElementById(`blog-block-${issue.blockId}`)?.scrollIntoView({behavior:'smooth',block:'center'})}><span>{issue.category}</span><b>{issue.phrase}</b><small>{issue.reason}</small><em>{issue.suggestion}</em></button>)}{!issues.length&&<div className="blog26-clean"><Check size={18}/> 현재 규칙에서 감지된 위험 표현이 없습니다.</div>}</div>{medical&&<div className="blog26-medical-box"><h4>의료광고 심의 관리</h4><label>사전심의 대상 여부<select value={project.medicalReview.required===true?'yes':project.medicalReview.required===false?'no':'unknown'} onChange={e=>onPatch({medicalReview:{...project.medicalReview,required:e.target.value==='yes'?true:e.target.value==='no'?false:null,status:e.target.value==='no'?'not-required':'check-needed'}})}><option value="unknown">담당자 확인 필요</option><option value="yes">심의 대상 확인</option><option value="no">심의 불필요 확인</option></select></label><label>심의 상태<select value={project.medicalReview.status} onChange={e=>onPatch({medicalReview:{...project.medicalReview,status:e.target.value as BlogProject['medicalReview']['status']}})}>{Object.entries(REVIEW_LABEL).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label><label>심의필번호<input value={project.medicalReview.reviewNumber} onChange={e=>onPatch({medicalReview:{...project.medicalReview,reviewNumber:e.target.value}})} placeholder="심의 완료 후 입력"/></label><label>심의 완료일<input type="date" value={project.medicalReview.reviewedAt?.slice(0,10)||''} onChange={e=>onPatch({medicalReview:{...project.medicalReview,reviewedAt:e.target.value}})}/></label>{project.medicalReview.locked?<button className="btn secondary wide" onClick={()=>void onUnlock()}><Unlock size={14}/> 문안 잠금 해제·재검토</button>:<button className="btn primary wide" disabled={project.medicalReview.status!=='approved'||!project.medicalReview.reviewNumber} onClick={()=>void onLock()}><Lock size={14}/> 심의 완료 문안 잠금</button>}<small>심의받은 문안의 무단 변경을 막기 위한 내부 관리 기능입니다.</small></div>}</section>
 }
