@@ -735,8 +735,10 @@ async function ensureAutopostProSeatsTable() {
   `);
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** 캐시된 좌석만 조회합니다(없으면 null) - GET 요청은 절대 좌석을 새로 만들지 않습니다. */
 async function findAutopostProSeat(advertiserId) {
+  if (!UUID_RE.test(advertiserId || '')) return null; // 형식이 아예 틀린 ID는 DB에 묻지 않고 "없음"으로 처리합니다.
   const cached = await pgPool.query('SELECT * FROM autopost_pro_seats WHERE advertiser_id = $1', [advertiserId]);
   return cached.rows[0] || null;
 }

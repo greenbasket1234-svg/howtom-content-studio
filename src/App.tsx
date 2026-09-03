@@ -7,6 +7,7 @@ import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { StubPage } from './pages/stub/StubPage';
 import { BlogProductionPage } from './features/blog/BlogProductionPage';
+import { AutopostProAdminPage } from './features/blog/AutopostProAdminPage';
 import { AdCreationPage } from './features/ad/AdCreationPage';
 import { TemplatesPage } from './features/templates/TemplatesPage';
 import { DocumentWritingPage } from './features/document/DocumentWritingPage';
@@ -58,6 +59,8 @@ export default function App() {
       <Route path="/assets/images" element={<RequireAuth><AssetsPage assetType="image" /></RequireAuth>} />
       <Route path="/assets/videos" element={<RequireAuth><AssetsPage assetType="video" /></RequireAuth>} />
       <Route path="/assets/documents" element={<RequireAuth><AssetsPage assetType="document" /></RequireAuth>} />
+
+      <Route path="/admin/autopost-pro" element={<RequireAuth><AutopostProAdminPage /></RequireAuth>} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

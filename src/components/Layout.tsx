@@ -29,6 +29,9 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string }[] }[] = 
     { to: '/assets/videos', label: '영상' },
     { to: '/assets/documents', label: '문서' },
   ] },
+  { label: '관리', items: [
+    { to: '/admin/autopost-pro', label: '오토포스트 Pro 관리' },
+  ] },
 ];
 
 export function Layout({ children }: { children: ReactNode }) {
