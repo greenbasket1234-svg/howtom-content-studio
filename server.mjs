@@ -1625,10 +1625,15 @@ const server = http.createServer(async (req, res) => {
           try {
             const cur = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
             if (cur.rows[0]) {
+              // PostgreSQL의 텍스트/JSONB 타입은 NUL(\u0000) 바이트를 담을 수 없습니다.
+              // 외부 AI가 만든 HTML에 이런 문자가 섞여 있으면 저장이 계속 실패하는데
+              // 원인을 알기 어려우니, 저장 전에 제거해서 방어합니다.
+              const stripInvalid = (v) => typeof v === 'string' ? v.replace(/\u0000/g, '') : v;
+              const cleanBlocks = (genResult.blocks || []).map(b => ({ ...b, title: stripInvalid(b.title), text: stripInvalid(b.text) }));
               const updated = {
                 ...cur.rows[0].data,
-                titleOptions: genResult.titles, selectedTitle: genResult.titles[0] || '', blocks: genResult.blocks, status: 'writing',
-                billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: genResult.metaDescription || '',
+                titleOptions: (genResult.titles || []).map(stripInvalid), selectedTitle: stripInvalid(genResult.titles?.[0] || ''), blocks: cleanBlocks, status: 'writing',
+                billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: stripInvalid(genResult.metaDescription || ''),
                 updatedAt: new Date().toISOString(),
               };
               await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updated)]);
@@ -1636,9 +1641,12 @@ const server = http.createServer(async (req, res) => {
             await pgPool.query(`UPDATE blog_generation_requests SET status='completed', completed_at=now() WHERE idempotency_key=$1`, [idempotencyKey]);
             return sendJson(res, 200, { ...genResult, idempotencyKey });
           } catch (saveError) {
+            // 예전엔 이 에러가 콘솔에 전혀 안 남아서, 저장이 왜 계속 실패하는지 로그로도
+            // 알 방법이 없었습니다 - 반드시 남깁니다(Railway 배포 로그에서 확인 가능).
+            console.error('[블로그 생성] 저장 실패:', { projectId, idempotencyKey, error: saveError?.message || saveError, stack: saveError?.stack });
             return sendJson(res, 200, {
               ...genResult, idempotencyKey,
-              saveWarning: '초안 생성은 완료됐지만 저장 중 오류가 발생했습니다(이미 과금됐을 수 있어 다시 생성하지 마세요). 잠시 후 같은 화면에서 다시 시도하면 재생성 없이 저장만 재시도합니다.',
+              saveWarning: `초안 생성은 완료됐지만 저장 중 오류가 발생했습니다(이미 과금됐을 수 있어 다시 생성하지 마세요): ${saveError?.message || '알 수 없는 오류'}. 같은 화면에서 다시 시도하면 재생성 없이 저장만 재시도합니다.`,
             });
           }
         }

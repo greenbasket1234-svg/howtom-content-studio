@@ -203,6 +203,10 @@ export function BlogProductionPage(){
   const AUTOPOST_SUPPORTED_INDUSTRIES:Record<string,string>={'병원·의료기관':'medical','치과':'medical','한의원':'medical','동물병원':'vet','세무사·세무법인':'tax','학원·교육':'academy'};
   const currentAdvertiser=advertisers.find(a=>a.id===project.advertiserId);
   const advertiserAutopostCode=currentAdvertiser?.autopost_pro_industry||(currentAdvertiser?.industry?AUTOPOST_SUPPORTED_INDUSTRIES[currentAdvertiser.industry]:undefined)||'';
+  // "오토포스트 Pro 업종 코드"는 override 전용 필드라, 업종을 나중에 바꿔도 예전 값이
+  // 그대로 남아있을 수 있습니다(정확히 이번에 겪으신 문제). medical/tax/academy/vet 4개
+  // 코드가 아닌 값이 남아있으면 화면에서 바로 보이게 경고합니다.
+  const overrideLooksStale=Boolean(currentAdvertiser?.autopost_pro_industry)&&!['medical','tax','academy','vet'].includes(currentAdvertiser!.autopost_pro_industry!);
   const autopostIndustrySupported=aiStatus?.provider!=='autopost-pro'||Boolean(advertiserAutopostCode);
   const autopostMissingBizNo=aiStatus?.provider==='autopost-pro'&&!currentAdvertiser?.business_reg_no;
   return <div className="blog26-page">
@@ -238,6 +242,7 @@ export function BlogProductionPage(){
         </div>
         {!autopostIndustrySupported&&<div className="blog26-usage-warn" style={{marginBottom:8}}>현재 오토포스트 Pro 블로그 생성이 지원되지 않는 업종입니다. (병원·치과·한의원·동물병원·세무·학원만 지원)</div>}
         {autopostIndustrySupported&&autopostMissingBizNo&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이 광고주는 사업자등록번호가 등록되어 있지 않습니다. HOWTOM Universe의 광고주 정보에서 먼저 입력하세요.</div>}
+        {aiStatus?.provider==='autopost-pro'&&overrideLooksStale&&<div className="blog26-usage-warn" style={{marginBottom:8}}>⚠ 이 광고주의 "오토포스트 Pro 업종 코드"에 <b>"{currentAdvertiser?.autopost_pro_industry}"</b>가 들어있어 실제 업종({currentAdvertiser?.industry})과 다르게 이 값이 우선 적용됩니다. medical/tax/academy/vet 중 하나가 아니라면 업종을 바꾸신 뒤 남은 예전 값일 수 있으니, HOWTOM Universe에서 이 필드를 비워두거나 올바른 코드로 수정하세요.</div>}
         {pendingIdempotencyKey&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 생성이 완료됐지만 저장에 실패했습니다(이미 과금됐을 수 있음). 아래 버튼은 재생성하지 않고 저장만 다시 시도합니다.</div>}
         <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured||generating||!autopostIndustrySupported||autopostMissingBizNo}>{generating?<>{pendingIdempotencyKey?'저장 재시도 중...':'생성 중... (잠시만요)'}</>:pendingIdempotencyKey?<><Save size={16}/> 저장만 다시 시도</>:<><Sparkles size={16}/> 초안 만들기</>}</button>
         <small className="blog26-help">{aiStatus?.provider==='autopost-pro'?'오토포스트 Pro가 업종별 규정을 반영해 초안을 작성합니다.':aiStatus?.configured?'제휴 업체 AI가 초안을 작성합니다.':'블로그 AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결됩니다(연동 필요). 현재는 직접 작성·편집·저장 기능을 사용하세요.'}</small>
