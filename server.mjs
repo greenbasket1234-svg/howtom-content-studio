@@ -626,6 +626,28 @@ function mapIndustryToAutopostCode(advertiser) {
   if (advertiser.autopost_pro_industry) return advertiser.autopost_pro_industry;
   return AUTOPOST_INDUSTRY_MAP[advertiser.industry || ''] || advertiser.industry || '';
 }
+/** 오토포스트 Pro API가 실제로 받는 길이 값은 이 4개뿐입니다(짧게 700~900 / 보통
+ * 1,100~1,500 / 길게 1,800~2,400 / 자동). 그 외 값은 API가 거부하므로, 화면에서
+ * 어떤 값이 와도 이 4개 중 하나로 정확히 매핑합니다. */
+const AUTOPOST_LENGTH_VALUES = ['short', 'medium', 'long', 'auto'];
+function mapLengthToAutopostCode(input) {
+  if (AUTOPOST_LENGTH_VALUES.includes(input)) return input;
+  const n = Number(input);
+  if (Number.isFinite(n)) {
+    if (n <= 900) return 'short';
+    if (n <= 1500) return 'medium';
+    return 'long'; // 1,800~2,400 이상 요청도 API 최대치인 long으로 보냅니다(3,000자 등 초과 요청 포함).
+  }
+  return 'auto';
+}
+
+/** 이 광고주가 오토포스트 Pro를 쓸 수 있는지(업종 지원 여부)만 가볍게 확인합니다 -
+ * 실제로 좌석을 만들지는 않아서, 생성 버튼을 누르기 전에 화면에서 안내만 하고 싶을 때 씁니다. */
+function isAutopostSupportedAdvertiser(advertiser) {
+  if (!advertiser) return false;
+  const industryCode = mapIndustryToAutopostCode(advertiser);
+  return ['medical', 'tax', 'academy', 'vet'].includes(industryCode);
+}
 
 async function ensureAutopostProSeatsTable() {
   if (!pgPool) return;
@@ -641,12 +663,51 @@ async function ensureAutopostProSeatsTable() {
       UNIQUE(advertiser_id)
     );
   `);
+  // 중복 과금 방지: 생성 시도 하나당 Idempotency-Key 하나를 끝까지 재사용합니다.
+  // status: requested(시도 중) → ai_completed(AI 생성 성공, HOWTOM 저장 전) → completed(저장까지 완료).
+  // ai_completed에서 멈춘 경우는 "생성 실패"가 아니라 "이미 과금됐을 수 있으니 저장만
+  // 재시도"로 취급해야 합니다 - 같은 키로 다시 생성 요청이 오면 AI를 다시 부르지 않고
+  // 캐시해둔 결과로 저장만 재시도합니다.
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS blog_generation_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      project_id TEXT,
+      idempotency_key TEXT NOT NULL,
+      provider_draft_id TEXT,
+      status TEXT NOT NULL DEFAULT 'requested',
+      billing JSONB,
+      result JSONB,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      completed_at TIMESTAMPTZ,
+      UNIQUE(idempotency_key)
+    );
+  `);
+  // 오토포스트 Pro의 업종별 규정검수(/v1/compliance) 결과를 HOWTOM 자체 사전점검과
+  // 구분해서 보관합니다 - 둘은 서로 다른 검수이므로 하나가 다른 하나를 대체하지 않습니다.
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS blog_compliance_checks (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      project_id TEXT,
+      passed BOOLEAN,
+      issues JSONB NOT NULL DEFAULT '[]'::jsonb,
+      checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
 }
 
-/** 이 광고주의 좌석을 캐시에서 찾고, 없으면 제휴 API에 새로 만듭니다. */
+/** 캐시된 좌석만 조회합니다(없으면 null) - GET 요청은 절대 좌석을 새로 만들지 않습니다. */
+async function findAutopostProSeat(advertiserId) {
+  const cached = await pgPool.query('SELECT * FROM autopost_pro_seats WHERE advertiser_id = $1', [advertiserId]);
+  return cached.rows[0] || null;
+}
+
+/** 이 광고주의 좌석을 캐시에서 찾고, 없으면 제휴 API에 실제로 새로 만듭니다(POST 전용 -
+ * 초안 생성처럼 실제로 좌석이 필요한 시점에만 호출해야 합니다). */
 async function ensureAutopostProSeat(tenantId, advertiser) {
-  const cached = await pgPool.query('SELECT * FROM autopost_pro_seats WHERE advertiser_id = $1', [advertiser.id]);
-  if (cached.rows.length) return cached.rows[0];
+  const cached = await findAutopostProSeat(advertiser.id);
+  if (cached) return cached;
   if (!advertiser.business_reg_no) { const e = new Error('이 광고주는 사업자등록번호가 등록되어 있지 않습니다. HOWTOM Universe의 광고주 정보에서 먼저 입력하세요.'); e.status = 400; throw e; }
   if (!advertiser.industry) { const e = new Error('이 광고주는 업종이 등록되어 있지 않습니다.'); e.status = 400; throw e; }
   const industryCode = mapIndustryToAutopostCode(advertiser);
@@ -666,6 +727,14 @@ async function ensureAutopostProSeat(tenantId, advertiser) {
   );
   return insert.rows[0];
 }
+/** 좌석을 정지/재개하고 우리 캐시도 같이 갱신합니다 - 계약 종료·서비스 중단 시 씁니다. */
+async function setAutopostProSeatStatus(advertiserId, action) {
+  const seatRow = await findAutopostProSeat(advertiserId);
+  if (!seatRow) { const e = new Error('이 광고주는 아직 오토포스트 Pro 좌석이 없습니다.'); e.status = 404; throw e; }
+  const updated = await autopostProRequest('POST', `/v1/seats/${seatRow.seat_id}/${action}`);
+  await pgPool.query('UPDATE autopost_pro_seats SET status=$2, updated_at=now() WHERE advertiser_id=$1', [advertiserId, updated.status || (action === 'suspend' ? 'suspended' : 'active')]);
+  return updated;
+}
 
 /** 제휴 업체 API를 호출합니다. 오토포스트 Pro가 연결되어 있으면 우선 사용하고,
  * 없으면 기존 범용 BLOG_PARTNER_API_URL(다른 업체용)로 대체합니다. */
@@ -679,11 +748,17 @@ async function callBlogGenerationProvider(brief) {
     const idempotencyKey = brief.idempotencyKey ? String(brief.idempotencyKey) : undefined;
     try {
       const draft = await autopostProRequest('POST', `/v1/seats/${seatRow.seat_id}/drafts`, {
-        keyword: brief.primaryKeyword, length: brief.length || 'auto', num_images: Number.isFinite(Number(brief.numImages)) ? Number(brief.numImages) : 1,
+        keyword: brief.primaryKeyword, length: mapLengthToAutopostCode(brief.length ?? brief.targetLength), num_images: Number.isFinite(Number(brief.numImages)) ? Number(brief.numImages) : 1,
         confirm_overage: Boolean(brief.confirmOverage),
       }, idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined);
       // Draft.body는 완성된 HTML이라, 우리 블록 구조 중 'html' 타입 블록 하나로 그대로 담습니다.
-      return { titles: [draft.title], blocks: [{ blockId: `html-${Date.now()}`, type: 'html', title: '', text: draft.body }], billing: draft.billing };
+      // title/body 외의 값(id, seat_id, tags, meta_description, billing 전체)도 버리지 않고
+      // 그대로 돌려줘서 호출부가 프로젝트에 저장할 수 있게 합니다.
+      return {
+        generator: 'autopost-pro',
+        titles: [draft.title], blocks: [{ blockId: `html-${Date.now()}`, type: 'html', title: '', text: draft.body }],
+        billing: draft.billing, providerDraftId: draft.id, seatId: draft.seat_id, tags: draft.tags || [], metaDescription: draft.meta_description || '',
+      };
     } catch (error) {
       if (error.code === 'overage_confirm_required') { const e = new Error(error.message); e.code = 'overage_confirm_required'; e.status = 409; throw e; }
       throw error;
@@ -701,6 +776,7 @@ async function callBlogGenerationProvider(brief) {
   const titles = Array.isArray(data.titles) ? data.titles : (data.title ? [data.title] : []);
   const blocks = Array.isArray(data.blocks) ? data.blocks : [];
   return {
+    generator: 'partner',
     titles: titles.slice(0, 5).map(t => cleanText(String(t), 200)),
     blocks: blocks.slice(0, 10).map((b, i) => ({ blockId: `block-${Date.now()}-${i}`, type: cleanText(String(b?.type || 'paragraph'), 20), title: cleanText(String(b?.title || ''), 200), text: cleanText(String(b?.text || ''), 4000) })),
   };
@@ -800,7 +876,10 @@ const server = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url || '/', 'http://localhost');
 
     if (req.method === 'GET' && pathname === '/api/health') {
-      return sendJson(res, 200, { ok: true, service: 'howtom-content-studio', phase: '2B-blog-ad', databaseConfigured: Boolean(DATABASE_URL), aiConfigured: false });
+      return sendJson(res, 200, {
+        ok: true, service: 'howtom-content-studio', phase: '3-autopost-pro-integrated', databaseConfigured: Boolean(DATABASE_URL),
+        aiConfigured: blogGenerationConfigured(), blogProvider: autopostProConfigured() ? 'autopost-pro' : (blogGenerationConfigured() ? 'partner' : null),
+      });
     }
 
     if (req.method === 'POST' && pathname === '/api/login') {
@@ -1335,40 +1414,163 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'GET' && pathname === '/api/blog/ai-status') {
           return sendJson(res, 200, { configured: blogGenerationConfigured(), provider: autopostProConfigured() ? 'autopost-pro' : (blogGenerationConfigured() ? 'partner' : null) });
         }
+
+        // ── 좌석(seat) 관리: 조회(GET)는 절대 새로 만들지 않고, 생성은 POST로만 ────
         if (req.method === 'GET' && pathname === '/api/blog/autopost-pro/seat') {
           if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
           const q = new URL(req.url, 'http://x').searchParams;
           const advertiserId = q.get('advertiserId');
           if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
-          const advRes = await pgPool.query('SELECT id, name, industry, business_reg_no, autopost_pro_industry FROM advertisers WHERE tenant_id=$1 AND id::text=$2', [tenantId, advertiserId]);
-          if (!advRes.rows[0]) return sendJson(res, 404, { error: '광고주를 찾을 수 없습니다.' });
+          const cached = await findAutopostProSeat(advertiserId);
+          if (!cached) return sendJson(res, 404, { error: '아직 좌석이 없습니다. 먼저 초안을 생성하거나 좌석을 만드세요.', noSeat: true });
           try {
-            const seatRow = await ensureAutopostProSeat(tenantId, advRes.rows[0]);
-            const fresh = await autopostProRequest('GET', `/v1/seats/${seatRow.seat_id}`);
+            const fresh = await autopostProRequest('GET', `/v1/seats/${cached.seat_id}`);
             await pgPool.query('UPDATE autopost_pro_seats SET plan=$2, trial_remaining=$3, status=$4, updated_at=now() WHERE advertiser_id=$1', [advertiserId, fresh.plan || null, fresh.trial_remaining ?? null, fresh.status || null]);
             return sendJson(res, 200, fresh);
           } catch (error) {
             return sendJson(res, error?.status || 502, { error: error?.message || '좌석 정보를 가져오지 못했습니다.' });
           }
         }
+        if (req.method === 'POST' && pathname === '/api/blog/autopost-pro/seat') {
+          if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
+          const body = await readJson(req);
+          const advertiserId = cleanText(body.advertiserId || '', 120);
+          if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
+          const advRes = await pgPool.query('SELECT id, name, industry, business_reg_no, autopost_pro_industry FROM advertisers WHERE tenant_id=$1 AND id::text=$2', [tenantId, advertiserId]);
+          if (!advRes.rows[0]) return sendJson(res, 404, { error: '광고주를 찾을 수 없습니다.' });
+          try {
+            const seatRow = await ensureAutopostProSeat(tenantId, advRes.rows[0]);
+            return sendJson(res, 201, seatRow);
+          } catch (error) {
+            return sendJson(res, error?.status || 502, { error: error?.message || '좌석 생성에 실패했습니다.' });
+          }
+        }
+        if (req.method === 'POST' && (pathname === '/api/blog/autopost-pro/seat/suspend' || pathname === '/api/blog/autopost-pro/seat/activate')) {
+          if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
+          const body = await readJson(req);
+          const advertiserId = cleanText(body.advertiserId || '', 120);
+          if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
+          const action = pathname.endsWith('suspend') ? 'suspend' : 'activate';
+          try {
+            const updated = await setAutopostProSeatStatus(advertiserId, action);
+            return sendJson(res, 200, updated);
+          } catch (error) {
+            return sendJson(res, error?.status || 502, { error: error?.message || '좌석 상태 변경에 실패했습니다.' });
+          }
+        }
+        if (req.method === 'GET' && pathname === '/api/blog/autopost-pro/seats') {
+          // 광고주 계약 종료 시 정지할 대상을 찾기 위한 전체 목록(HOWTOM 광고주명 포함).
+          if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
+          const rows = await pgPool.query(
+            `SELECT s.*, a.name as advertiser_name FROM autopost_pro_seats s JOIN advertisers a ON a.id = s.advertiser_id WHERE s.tenant_id = $1 ORDER BY s.updated_at DESC`,
+            [tenantId]
+          );
+          return sendJson(res, 200, { items: rows.rows });
+        }
+
+        // ── 월 사용량·정산 조회 ───────────────────────────────────────────
+        if (req.method === 'GET' && pathname === '/api/blog/autopost-pro/usage') {
+          if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
+          const q = new URL(req.url, 'http://x').searchParams;
+          const month = q.get('month');
+          try {
+            const usage = await autopostProRequest('GET', `/v1/usage${month ? `?month=${encodeURIComponent(month)}` : ''}`);
+            return sendJson(res, 200, usage);
+          } catch (error) {
+            return sendJson(res, error?.status || 502, { error: error?.message || '사용량 조회에 실패했습니다.' });
+          }
+        }
+
+        // ── 업종별 규정검수(/v1/compliance) - HOWTOM 자체 사전점검(complianceEngine.ts)과는
+        // 별개입니다. 여기서는 오토포스트 Pro가 실제로 계산한 결과만 반환·저장합니다.
+        if (req.method === 'POST' && pathname === '/api/blog/compliance') {
+          if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
+          const body = await readJson(req);
+          const industry = cleanText(body.industry || '', 40);
+          const text = cleanText(body.text || '', 20000);
+          const orgName = cleanText(body.orgName || body.org_name || '', 200);
+          if (!industry || !text) return sendJson(res, 400, { error: 'industry와 text가 필요합니다.' });
+          try {
+            const result = await autopostProRequest('POST', '/v1/compliance', { industry, text, org_name: orgName });
+            await pgPool.query(
+              `INSERT INTO blog_compliance_checks (tenant_id, project_id, passed, issues) VALUES ($1,$2,$3,$4)`,
+              [tenantId, cleanText(body.projectId || '', 120) || null, Boolean(result.passed), JSON.stringify(result.issues || [])]
+            );
+            return sendJson(res, 200, result);
+          } catch (error) {
+            return sendJson(res, error?.status || 502, { error: error?.message || '규정검수에 실패했습니다.' });
+          }
+        }
+
+        // ── 초안 생성 (중복 과금 방지: 같은 idempotencyKey는 AI를 다시 부르지 않습니다) ──
         if (req.method === 'POST' && pathname === '/api/blog/generate') {
           const body = await readJson(req);
           const keyword = cleanText(body.primaryKeyword, 200);
           if (!keyword) return sendJson(res, 400, { error: '메인 키워드를 입력하세요.' });
+          const idempotencyKey = cleanText(body.idempotencyKey || '', 100);
+          if (!idempotencyKey) return sendJson(res, 400, { error: 'idempotencyKey가 필요합니다(중복 생성·중복 과금 방지용).' });
+          const projectId = cleanText(body.projectId || '', 120);
+
+          // 이미 같은 키로 완전히 끝난 시도가 있으면 그 결과를 그대로 재사용합니다(재클릭·재요청 방지).
+          const existing = await pgPool.query('SELECT * FROM blog_generation_requests WHERE idempotency_key=$1', [idempotencyKey]);
+          const reqRow = existing.rows[0];
+          if (reqRow?.status === 'completed') {
+            return sendJson(res, 200, { ...reqRow.result, billing: reqRow.billing, idempotencyKey, replayed: true });
+          }
+
+          let genResult;
+          if (reqRow?.status === 'ai_completed') {
+            // AI 호출은 이미 성공(=이미 과금됐을 수 있음)했는데 저장에서 멈춘 경우 - AI를
+            // 다시 부르지 않고, 캐시해둔 결과로 저장만 다시 시도합니다.
+            genResult = { ...reqRow.result, billing: reqRow.billing };
+          } else {
+            try {
+              const brief = {
+                advertiserId: cleanText(body.advertiserId || '', 120),
+                industry: cleanText(body.industry || '업종 무관', 60), platform: cleanText(body.platform || '블로그', 60),
+                primaryKeyword: keyword,
+                // 서브 키워드·지역·톤앤매너·참고자료는 오토포스트 Pro API 규격에 없는 필드라
+                // 실제 생성 요청에는 반영되지 않습니다 - HOWTOM 내부 참고용으로만 저장됩니다.
+                secondaryKeywords: Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords : [],
+                region: cleanText(body.region || '', 60), targetLength: Number(body.targetLength) || undefined, tone: cleanText(body.tone || '자연스러운 정보 전달형', 60),
+                length: cleanText(body.length || '', 20), numImages: body.numImages, confirmOverage: Boolean(body.confirmOverage),
+                idempotencyKey,
+              };
+              genResult = await callBlogGenerationProvider(brief);
+              await pgPool.query(
+                `INSERT INTO blog_generation_requests (tenant_id, project_id, idempotency_key, provider_draft_id, status, billing, result)
+                 VALUES ($1,$2,$3,$4,'ai_completed',$5,$6)
+                 ON CONFLICT (idempotency_key) DO UPDATE SET status='ai_completed', billing=$5, result=$6, provider_draft_id=$4`,
+                [tenantId, projectId || null, idempotencyKey, genResult.providerDraftId || null, JSON.stringify(genResult.billing || null), JSON.stringify(genResult)]
+              );
+            } catch (error) {
+              const status = error?.code === 'overage_confirm_required' ? 409 : (error?.status || 502);
+              return sendJson(res, status, { error: error instanceof Error ? error.message : 'AI 원고 생성에 실패했습니다.', code: error?.code });
+            }
+          }
+
+          // 생성된 내용을 프로젝트에 저장합니다. 이 저장이 실패해도 "생성 실패"가 아니라
+          // "생성은 끝났고(이미 과금됐을 수 있음) 저장만 재시도가 필요"한 상태입니다.
           try {
-            const brief = {
-              advertiserId: cleanText(body.advertiserId || '', 120),
-              industry: cleanText(body.industry || '업종 무관', 60), platform: cleanText(body.platform || '블로그', 60),
-              primaryKeyword: keyword, secondaryKeywords: Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords : [],
-              region: cleanText(body.region || '', 60), targetLength: Number(body.targetLength) || 2000, tone: cleanText(body.tone || '자연스러운 정보 전달형', 60),
-              length: cleanText(body.length || '', 20), numImages: body.numImages, confirmOverage: Boolean(body.confirmOverage),
-              idempotencyKey: cleanText(body.idempotencyKey || '', 100),
-            };
-            const { titles, blocks, billing } = await callBlogGenerationProvider(brief);
-            return sendJson(res, 200, { generator: autopostProConfigured() && brief.advertiserId ? 'autopost-pro' : 'partner', titles, blocks, billing });
-          } catch (error) {
-            const status = error?.code === 'overage_confirm_required' ? 409 : (error?.status || 502);
-            return sendJson(res, status, { error: error instanceof Error ? error.message : 'AI 원고 생성에 실패했습니다.', code: error?.code });
+            if (projectId) {
+              const cur = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+              if (cur.rows[0]) {
+                const updated = {
+                  ...cur.rows[0].data,
+                  titleOptions: genResult.titles, selectedTitle: genResult.titles[0] || '', blocks: genResult.blocks, status: 'writing',
+                  billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: genResult.metaDescription || '',
+                  updatedAt: new Date().toISOString(),
+                };
+                await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updated)]);
+              }
+            }
+            await pgPool.query(`UPDATE blog_generation_requests SET status='completed', completed_at=now() WHERE idempotency_key=$1`, [idempotencyKey]);
+            return sendJson(res, 200, { ...genResult, idempotencyKey });
+          } catch (saveError) {
+            return sendJson(res, 200, {
+              ...genResult, idempotencyKey,
+              saveWarning: '초안 생성은 완료됐지만 저장 중 오류가 발생했습니다(이미 과금됐을 수 있어 다시 생성하지 마세요). 잠시 후 같은 화면에서 다시 시도하면 재생성 없이 저장만 재시도합니다.',
+            });
           }
         }
 

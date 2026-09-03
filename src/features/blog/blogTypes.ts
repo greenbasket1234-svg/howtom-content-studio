@@ -7,6 +7,11 @@ export type BlogMedicalReview = {
   reviewedAt: string;
   locked: boolean;
 };
+export type AutopostBilling = { billable:boolean; plan:'trial'|'paid'; quota_used:number; quota_limit:number; overage:boolean; overage_price_krw:number };
+export type AutopostSeat = { id:string; plan:'trial'|'paid'; trial_remaining?:number; status:'active'|'suspended' };
+export type AutopostComplianceIssue = { category:string; label:string; law:string; guide:string; matched:string[] };
+export type AutopostComplianceResult = { passed:boolean; issues:AutopostComplianceIssue[] };
+
 export type BlogProject = {
   projectId:string;
   advertiserId:string;
@@ -36,6 +41,13 @@ export type BlogProject = {
   publishedUrl?:string;
   createdAt:string;
   updatedAt:string;
+  // 오토포스트 Pro로 생성한 경우에만 채워집니다.
+  billing?:AutopostBilling|null;
+  providerDraftId?:string|null;
+  tags?:string[];
+  metaDescription?:string;
+  // 오토포스트 Pro 업종별 규정검수(HOWTOM 자체 사전점검과 별개) 마지막 결과.
+  autopostCompliance?:AutopostComplianceResult|null;
 };
 export type BlogStyleProfile = {
   advertiserId:string;
