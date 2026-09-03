@@ -601,14 +601,52 @@ const AUTOPOST_PRO_API_KEY = process.env.AUTOPOST_PRO_API_KEY || '';
 const AUTOPOST_PRO_BASE_URL = process.env.AUTOPOST_PRO_BASE_URL || 'https://aiblog.zionlabs.org';
 function autopostProConfigured() { return Boolean(AUTOPOST_PRO_API_KEY); }
 
-async function autopostProRequest(method, path, body, extraHeaders) {
-  const res = await fetch(`${AUTOPOST_PRO_BASE_URL}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${AUTOPOST_PRO_API_KEY}`, 'Content-Type': 'application/json', ...(extraHeaders || {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+/**
+ * 오토포스트 Pro 호출 - Timeout과 재시도 정책을 명시적으로 둡니다.
+ * - Timeout: 90초 (60~120초 권장 범위 중간값)
+ * - 재시도 대상: 네트워크 오류, Timeout, 503만 - 최대 2회, 1초 → 3초 간격
+ * - 재시도 키: 최초 호출과 완전히 동일한 Idempotency-Key를 그대로 재사용합니다
+ *   (다른 키를 쓰면 오토포스트 Pro 쪽에서 별개 요청으로 처리해 중복 과금될 수 있습니다).
+ * - 재시도 금지: 400(입력 오류)·401(키 오류)·404(seat 없음)·409(한도 초과 동의 필요)는
+ *   재시도해도 결과가 달라지지 않거나, 사용자 확인이 먼저 필요한 상태라 그대로 던집니다.
+ */
+const AUTOPOST_PRO_TIMEOUT_MS = 90_000;
+const AUTOPOST_PRO_RETRY_DELAYS_MS = [1000, 3000];
+// 재시도 대상은 네트워크 오류·Timeout·503뿐입니다. 400(입력 오류)·401(키 오류)·
+// 404(seat 없음)·409(한도 초과 동의 필요)는 아래에서 503이 아니면 재시도하지 않는
+// 분기로 이미 자연스럽게 제외됩니다 - 재시도해도 결과가 달라지지 않거나 사용자
+// 확인이 먼저 필요한 상태이기 때문입니다.
+
+async function autopostProRequest(method, path, body, extraHeaders, attempt = 0) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AUTOPOST_PRO_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${AUTOPOST_PRO_BASE_URL}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${AUTOPOST_PRO_API_KEY}`, 'Content-Type': 'application/json', ...(extraHeaders || {}) },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (networkError) {
+    clearTimeout(timeoutId);
+    // AbortError(Timeout 포함)와 일반 네트워크 오류만 재시도 대상입니다.
+    if (attempt < AUTOPOST_PRO_RETRY_DELAYS_MS.length) {
+      await new Promise(r => setTimeout(r, AUTOPOST_PRO_RETRY_DELAYS_MS[attempt]));
+      return autopostProRequest(method, path, body, extraHeaders, attempt + 1);
+    }
+    const timedOut = networkError?.name === 'AbortError';
+    const err = new Error(timedOut ? '오토포스트 Pro API 응답이 지연되어 시간 초과되었습니다(재시도 2회 모두 실패).' : `오토포스트 Pro API 연결에 실패했습니다: ${networkError?.message || networkError}`);
+    err.code = timedOut ? 'timeout' : 'network_error';
+    throw err;
+  }
+  clearTimeout(timeoutId);
   const data = await res.json().catch(() => null);
   if (!res.ok) {
+    if (res.status === 503 && attempt < AUTOPOST_PRO_RETRY_DELAYS_MS.length) {
+      await new Promise(r => setTimeout(r, AUTOPOST_PRO_RETRY_DELAYS_MS[attempt]));
+      return autopostProRequest(method, path, body, extraHeaders, attempt + 1);
+    }
     const err = new Error(data?.error?.message || `오토포스트 Pro API HTTP ${res.status}`);
     err.code = data?.error?.code; err.status = res.status;
     throw err;

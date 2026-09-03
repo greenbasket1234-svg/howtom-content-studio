@@ -1,3 +1,10 @@
+/**
+ * HOWTOM 자체 사전점검(로컬 규칙 기반) — 오토포스트 Pro의 업종별 규정검수(/v1/compliance,
+ * blogApi.autopostCompliance)와는 완전히 별개입니다. 이 엔진은:
+ * - 서버 API 호출 없이 프론트에서 즉시 실행되는 "1차 자체 검토용" 규칙 검사입니다.
+ * - 오토포스트 Pro가 연결되지 않았거나, 지원하지 않는 업종에도 항상 사용할 수 있습니다.
+ * - 오토포스트 Pro의 실제 규정검수 결과를 대체하지 않습니다 - 둘 다 통과해야 더 안전합니다.
+ */
 import type { BlogProject, ComplianceIssue } from './blogTypes';
 
 const MEDICAL_INDUSTRIES=['병원·의료기관','병원','의원','치과','한의원','한방병원'];

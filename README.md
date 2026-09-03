@@ -12,7 +12,7 @@ HOWTOM 유니버스(광고 운영)에서 콘텐츠 관련 기능을 분리한 �
 |---|---|---|
 | 기반 | 앱 분리, 공통 광고주 선택, Universe ↔ 상호 이동 | |
 | 제작 | 광고 제작 | `ad_projects` |
-| 제작 | 블로그 제작 (SEO·업종별 규정 점검·심의 잠금 포함) | `blog_projects`, `blog_styles`, `blog_assets` |
+| 제작 | 블로그 제작 (SEO·업종별 규정 점검·심의 잠금 포함) | `blog_projects`, `blog_styles`, `blog_assets`, `blog_generation_requests`, `blog_compliance_checks` |
 | 제작 | 영상 대본 (타임라인 편집) | `video_script_projects` |
 | 제작 | 문서 작성 (블록 편집) | `document_projects` |
 | 제작 | 템플릿 (복제/버전 관리) | `content_templates` |
@@ -23,7 +23,7 @@ HOWTOM 유니버스(광고 운영)에서 콘텐츠 관련 기능을 분리한 �
 | 레퍼런스 | 레퍼런스 보드 | `reference_boards`, `reference_board_items` |
 | 레퍼런스 | 자동 수집 Worker (매일 KST 8·20시) | 서버 내부 스케줄러 |
 | AI | 공용 AI Gateway (레퍼런스 AI 분석 등) | Anthropic/OpenAI/custom |
-| AI | 블로그 AI 원고 생성 | 제휴 업체 API Adapter 방식 (아래 참고) |
+| AI | 블로그 AI 원고 생성 | 오토포스트 Pro 연동 완료·보완 중 (아래 참고), 미연결 시 범용 Adapter로 대체 |
 
 **미구현**: 이미지 제작, TikTok/Threads 커넥터, AI 의미 기반 검색
 
@@ -32,9 +32,22 @@ HOWTOM 유니버스(광고 운영)에서 콘텐츠 관련 기능을 분리한 �
 콘텐츠 제작소는 AI를 **두 개의 서로 다른 경로**로 나눕니다.
 
 1. **공용 AI Gateway** (`AI_PROVIDER`/`AI_API_KEY`) — 레퍼런스 AI 분석 등 "해석·분석" 용도
-2. **블로그 AI 원고 생성** (`BLOG_PARTNER_API_URL`/`BLOG_PARTNER_API_KEY`) — 제휴 업체가 확정되기 전까지는 `/api/blog/generate`가 "연동 필요" 상태를 정직하게 반환합니다. 가짜 원고를 만들어내지 않습니다.
+2. **블로그 AI 원고 생성** — 오토포스트 Pro(㈜시온랩스, `AUTOPOST_PRO_API_KEY`)가 연동 완료되어 우선 사용됩니다. 설정되어 있지 않으면 범용 자리(`BLOG_PARTNER_API_URL`/`BLOG_PARTNER_API_KEY`, 다른 업체용)로 대체되고, 둘 다 없으면 `/api/blog/generate`가 "연동 필요" 상태를 정직하게 반환합니다. 가짜 원고를 만들어내지 않습니다.
 
 두 경로를 하나로 합치지 않는 이유는, 나중에 블로그 원고 제휴사가 바뀌어도 다른 AI 기능(레퍼런스 분석 등)에 영향이 없도록 하기 위해서입니다.
+
+### 오토포스트 Pro 설정·테스트 방법
+
+1. Railway Variables에 `AUTOPOST_PRO_API_KEY`를 설정합니다(`AUTOPOST_PRO_BASE_URL`은 기본값 `https://aiblog.zionlabs.org`을 그대로 두면 됩니다).
+2. 이 API는 **4개 업종만** 지원합니다: `medical`(병원·치과·한의원) · `tax`(세무) · `academy`(학원) · `vet`(동물병원). 다른 업종은 광고주 정보의 "오토포스트 Pro 업종 코드"에 제휴사가 안내해준 코드를 직접 입력해야 사용할 수 있습니다.
+3. 광고주에게 **사업자등록번호**(`business_reg_no`)가 등록되어 있어야 좌석(seat)이 만들어집니다 — HOWTOM Universe의 광고주 정보 화면에서 입력합니다(같은 DB를 공유하므로 여기서 입력하면 콘텐츠 제작소에 바로 반영됩니다).
+4. 사업자등록번호당 평생 무료체험 3건 이후 유료 전환되고, 월 한도 초과 시 건당 3,000원이 청구됩니다 — 테스트 시 실제 과금이 발생할 수 있으니 유의하세요.
+5. 확인용 엔드포인트:
+   - `GET /api/blog/ai-status` — 어떤 제공자가 켜져 있는지 확인
+   - `GET /api/blog/autopost-pro/seat?advertiserId=...` — 좌석 상태 조회(없으면 404, 자동 생성 안 함)
+   - `GET /api/blog/autopost-pro/usage?month=2026-09` — 월 사용량·정산 조회
+   - `POST /api/blog/compliance` — 오토포스트 Pro 업종별 규정검수(무과금)
+6. 재시도 정책: Timeout 90초, 네트워크 오류·Timeout·503만 최대 2회(1초→3초 간격) 재시도하며, 매번 같은 Idempotency-Key를 재사용해 중복 과금을 방지합니다. 400·401·404·409는 재시도하지 않습니다.
 
 ## 광고주 범위 선택
 

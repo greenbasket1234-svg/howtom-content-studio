@@ -1417,9 +1417,8 @@ Content Studio가 책임지는 기능은 Universe에서 중복 구현하지 않�
 
 ## P0 — 코드·문서·제품 정책 정합성
 
-1. **블로그 AI 경로 정리**  
-   현재 `/api/blog/generate`가 공용 AI Gateway를 호출하는 구현을 제품 정책과 맞춘다.
-   제휴 업체 확정 전에는 `연동 필요`로 유지하고, 확정 후 `BlogGenerationProvider → Partner Adapter`로 교체한다.
+1. **블로그 AI 경로 정리** ✅ 완료  
+   `/api/blog/generate`가 오토포스트 Pro(㈜시온랩스)를 우선 사용하도록 연동 완료. 미설정 시 범용 Partner Adapter로 대체, 둘 다 없으면 `연동 필요`를 정직하게 반환한다.
 
 2. **Content Studio 문서/환경변수 드리프트 수정**  
    실제 코드에는 Meta Ad Library, YouTube, Instagram, AI Gateway가 존재하지만
@@ -1725,7 +1724,7 @@ AI 자동화 메뉴의 예약/보고서/카피
 | 6 | TikTok Connector | ⬜ 준비중 | 현재 `connector-status=false`, 실제 Connector 코드 없음 |
 | 7 | 공용 AI Gateway | 🔗 연동 필요 | Anthropic/OpenAI/custom 호출 코드 구현, Credential 필요 |
 | 7 | 레퍼런스 AI 분석 | 🔗 연동 필요 | 저장 레퍼런스 분석 API 구현, AI Gateway 연결 필요 |
-| 7 | 블로그 AI 생성 | 🟡 구현은 있으나 정책 불일치 | 현재 공용 AI Gateway에 연결되어 있으나 To-Be는 제휴업체 Partner Adapter |
+| 7 | 블로그 AI 생성 | 🟢 연동 완료·보완 중 | 오토포스트 Pro(㈜시온랩스) 연동 완료. 중복과금 방지·입력값 매핑·규정검수·seat/usage 관리·Timeout 재시도까지 반영, 관리자 대시보드 UI는 후순위 |
 | 7 | AI 의미 검색 | ⬜ 준비중 | Semantic/Vector 검색 구현 없음 |
 | 7 | 광고/영상 제작 AI 고도화 | ⬜ 준비중 | 별도 AI 제작 지원 미구현 |
 
