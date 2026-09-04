@@ -668,6 +668,31 @@ function mapIndustryToAutopostCode(advertiser) {
  * 1,100~1,500 / 길게 1,800~2,400 / 자동). 그 외 값은 API가 거부하므로, 화면에서
  * 어떤 값이 와도 이 4개 중 하나로 정확히 매핑합니다. */
 const AUTOPOST_LENGTH_VALUES = ['short', 'medium', 'long', 'auto'];
+/**
+ * PostgreSQL의 텍스트/JSONB 타입은 두 가지를 담지 못합니다:
+ * 1) NUL(\u0000) 바이트
+ * 2) 서로 짝이 안 맞는 surrogate 문자(깨진 이모지 등 - AI가 이모지를 생성하다 잘리면 흔히 생김)
+ * 이 중 하나라도 있으면 INSERT/UPDATE 자체가 "invalid input syntax" 류 오류로 실패합니다.
+ * 예전엔 blog_projects에 저장하기 "직전"에만 개별 필드를 정제했는데, 그보다 먼저 실행되는
+ * blog_generation_requests INSERT(외부 API 응답을 그대로 캐싱하는 단계)가 깨진 문자 때문에
+ * 이미 실패해버리면 정제 코드까지 도달하지도 못했습니다. 그래서 외부 API 응답을 받은
+ * "직후", 첫 DB 저장보다 먼저, 객체 전체(중첩 배열·객체 포함)를 재귀적으로 정제합니다.
+ */
+function sanitizeDeep(value) {
+  if (typeof value === 'string') {
+    return value
+      .replace(/\u0000/g, '')
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')
+      .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+  }
+  if (Array.isArray(value)) return value.map(sanitizeDeep);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = sanitizeDeep(value[k]);
+    return out;
+  }
+  return value;
+}
 function mapLengthToAutopostCode(input) {
   if (AUTOPOST_LENGTH_VALUES.includes(input)) return input;
   const n = Number(input);
@@ -1591,8 +1616,9 @@ const server = http.createServer(async (req, res) => {
           let genResult;
           if (reqRow?.status === 'ai_completed') {
             // AI 호출은 이미 성공(=이미 과금됐을 수 있음)했는데 저장에서 멈춘 경우 - AI를
-            // 다시 부르지 않고, 캐시해둔 결과로 저장만 다시 시도합니다.
-            genResult = { ...reqRow.result, billing: reqRow.billing };
+            // 다시 부르지 않고, 캐시해둔 결과로 저장만 다시 시도합니다. 이 fix 배포 전에
+            // 이미 저장된(정제 안 된) 캐시일 수도 있으니 여기서도 한 번 더 정제합니다.
+            genResult = sanitizeDeep({ ...reqRow.result, billing: reqRow.billing });
           } else {
             try {
               const brief = {
@@ -1606,7 +1632,7 @@ const server = http.createServer(async (req, res) => {
                 length: cleanText(body.length || '', 20), numImages: body.numImages, confirmOverage: Boolean(body.confirmOverage),
                 idempotencyKey,
               };
-              genResult = await callBlogGenerationProvider(brief);
+              genResult = sanitizeDeep(await callBlogGenerationProvider(brief));
               await pgPool.query(
                 `INSERT INTO blog_generation_requests (tenant_id, project_id, idempotency_key, provider_draft_id, status, billing, result)
                  VALUES ($1,$2,$3,$4,'ai_completed',$5,$6)
@@ -1625,25 +1651,12 @@ const server = http.createServer(async (req, res) => {
           try {
             const cur = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
             if (cur.rows[0]) {
-              // PostgreSQL의 텍스트/JSONB 타입은 두 가지를 담지 못합니다:
-              // 1) NUL(\u0000) 바이트
-              // 2) 서로 짝이 안 맞는 surrogate 문자(깨진 이모지 등 - AI가 이모지를 생성하다가
-              //    잘리면 흔히 생깁니다. 이번에 사진 위치 안내에 카메라 이모지가 들어가면서
-              //    이 문제가 새로 나타났을 가능성이 높습니다)
-              // 이 중 하나라도 있으면 저장이 "invalid byte sequence" 류의 오류로 계속
-              // 실패하는데 원인을 알기 어려우니, 저장 전에 제거해서 방어합니다.
-              const stripInvalid = (v) => {
-                if (typeof v !== 'string') return v;
-                return v
-                  .replace(/\u0000/g, '')
-                  .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '') // 뒤에 짝이 없는 상위 서로게이트
-                  .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, ''); // 앞에 짝이 없는 하위 서로게이트
-              };
-              const cleanBlocks = (genResult.blocks || []).map(b => ({ ...b, title: stripInvalid(b.title), text: stripInvalid(b.text) }));
+              // genResult는 이미 위에서(callBlogGenerationProvider 직후, 첫 DB 저장 전에)
+              // sanitizeDeep으로 정제됐으므로 여기서 다시 필드별로 정제할 필요가 없습니다.
               const updated = {
                 ...cur.rows[0].data,
-                titleOptions: (genResult.titles || []).map(stripInvalid), selectedTitle: stripInvalid(genResult.titles?.[0] || ''), blocks: cleanBlocks, status: 'writing',
-                billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: stripInvalid(genResult.metaDescription || ''),
+                titleOptions: genResult.titles || [], selectedTitle: genResult.titles?.[0] || '', blocks: genResult.blocks || [], status: 'writing',
+                billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: genResult.metaDescription || '',
                 updatedAt: new Date().toISOString(),
               };
               await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updated)]);
