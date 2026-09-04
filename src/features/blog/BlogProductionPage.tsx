@@ -41,26 +41,7 @@ function sanitizeHtml(html:string):string{
 function stripHtml(html:string):string{
   return html.replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
 }
-/** 오토포스트 Pro가 실제로 돌려주는 본문은 <p>/<h2> 같은 진짜 HTML 태그가 아니라,
- * "■ 소제목" 표기와 빈 줄로 문단을 구분하는 일반 텍스트에 가깝습니다. 사용자가 태그를
- * 직접 달지 않아도 되도록, 이 관례를 실제 HTML 구조로 자동 변환합니다. 이미 실제
- * HTML 태그가 있으면 이중 변환을 막기 위해 그대로 둡니다. */
-function autoFormatToHtml(text:string):string{
-  if(/<(p|h[1-6]|ul|ol|li|div|figure)[\s>]/i.test(text))return text; // 이미 실제 HTML이면 그대로 둡니다.
-  const paragraphs=text.split(/\n\s*\n/).map(p=>p.trim()).filter(Boolean);
-  return paragraphs.map(p=>{
-    if(/^\[사진\d*\]$/.test(p))return `<figure class="blog-photo-slot">${p}</figure>`;
-    if(/^■\s*/.test(p)){
-      // "■ 소제목" 바로 다음 줄에 본문이 이어 붙는 경우가 많아, 첫 줄만 소제목(h3)으로
-      // 빼고 나머지는 별도 문단(p)으로 분리합니다 - 안 그러면 본문까지 h3 안에 갇힙니다.
-      const lines=p.split('\n');
-      const heading=lines[0].replace(/^■\s*/,'');
-      const rest=lines.slice(1).join('<br>').trim();
-      return rest?`<h3>${heading}</h3>\n<p>${rest}</p>`:`<h3>${heading}</h3>`;
-    }
-    return `<p>${p.replace(/\n/g,'<br>')}</p>`;
-  }).join('\n');
-}
+
 
 function statusTone(status:string){return status==='published'||status==='approved'?'success':status==='revision'?'danger':status==='review'||status==='publish-ready'?'warning':'neutral'}
 
@@ -388,17 +369,14 @@ function PhotoPanel({assets,project,onAttach,onRegister}:{assets:BlogAsset[];pro
  * 실제 서식으로 렌더링)이고, 'HTML 편집'을 누르면 원본 태그를 직접 고칠 수 있습니다. */
 function HtmlBlockEditor({block,locked,onChange}:{block:BlogBlock;locked:boolean;onChange:(change:Partial<BlogBlock>)=>void}){
   const [mode,setMode]=useState<'preview'|'edit'>('preview');
-  const alreadyFormatted=/<(p|h[1-6]|ul|ol|li|div|figure)[\s>]/i.test(block.text||'');
   return <div className="blog26-html-block">
     <div className="blog26-html-toggle">
       <button type="button" className={mode==='preview'?'active':''} onClick={()=>setMode('preview')}>미리보기</button>
       <button type="button" className={mode==='edit'?'active':''} onClick={()=>setMode('edit')} disabled={locked}>HTML 편집</button>
-      {!alreadyFormatted&&<button type="button" className="btn secondary mini" onClick={()=>onChange({text:autoFormatToHtml(block.text||'')})} disabled={locked} title="■ 소제목, 빈 줄 구분 문단을 실제 h3·p 태그로 자동 변환합니다.">자동 서식 적용</button>}
     </div>
     {mode==='preview'
       ? <div className="blog26-html-preview" dangerouslySetInnerHTML={{__html:sanitizeHtml(block.text||'')}}/>
       : <textarea rows={14} className="blog26-html-source" value={block.text||''} onChange={e=>onChange({text:e.target.value})} placeholder="HTML 소스" disabled={locked}/>}
-    {!alreadyFormatted&&<small className="blog26-help">오토포스트 Pro 원문은 아직 실제 태그 없이 "■ 소제목"·빈 줄 구분 형태입니다 - "자동 서식 적용"을 누르면 실제 소제목·문단 태그로 바뀌어, 블로그에 발행했을 때 서식이 제대로 보입니다.</small>}
   </div>;
 }
 function AutopostProPanel({project,advertiser,seat,industryCode}:{project:BlogProject;advertiser:ReturnType<typeof useAdvertisers>[0][number]|null;seat:{plan:'trial'|'paid';trial_remaining?:number;status:string}|null;industryCode:string}){
