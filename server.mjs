@@ -1625,10 +1625,20 @@ const server = http.createServer(async (req, res) => {
           try {
             const cur = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
             if (cur.rows[0]) {
-              // PostgreSQL의 텍스트/JSONB 타입은 NUL(\u0000) 바이트를 담을 수 없습니다.
-              // 외부 AI가 만든 HTML에 이런 문자가 섞여 있으면 저장이 계속 실패하는데
-              // 원인을 알기 어려우니, 저장 전에 제거해서 방어합니다.
-              const stripInvalid = (v) => typeof v === 'string' ? v.replace(/\u0000/g, '') : v;
+              // PostgreSQL의 텍스트/JSONB 타입은 두 가지를 담지 못합니다:
+              // 1) NUL(\u0000) 바이트
+              // 2) 서로 짝이 안 맞는 surrogate 문자(깨진 이모지 등 - AI가 이모지를 생성하다가
+              //    잘리면 흔히 생깁니다. 이번에 사진 위치 안내에 카메라 이모지가 들어가면서
+              //    이 문제가 새로 나타났을 가능성이 높습니다)
+              // 이 중 하나라도 있으면 저장이 "invalid byte sequence" 류의 오류로 계속
+              // 실패하는데 원인을 알기 어려우니, 저장 전에 제거해서 방어합니다.
+              const stripInvalid = (v) => {
+                if (typeof v !== 'string') return v;
+                return v
+                  .replace(/\u0000/g, '')
+                  .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '') // 뒤에 짝이 없는 상위 서로게이트
+                  .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, ''); // 앞에 짝이 없는 하위 서로게이트
+              };
               const cleanBlocks = (genResult.blocks || []).map(b => ({ ...b, title: stripInvalid(b.title), text: stripInvalid(b.text) }));
               const updated = {
                 ...cur.rows[0].data,
