@@ -3,7 +3,7 @@ import { createContext, useContext, useState, type ReactNode } from 'react';
 const TOKEN_KEY = 'cs_token';
 const USER_KEY = 'cs_user';
 
-type User = { email: string; name: string };
+type User = { email: string; name: string; isAdvertiserAccount?: boolean; advertiserId?: string | null };
 type AuthValue = {
   user: User | null;
   loading: boolean;

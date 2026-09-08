@@ -41,26 +41,7 @@ function sanitizeHtml(html:string):string{
 function stripHtml(html:string):string{
   return html.replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
 }
-/** 오토포스트 Pro가 실제로 돌려주는 본문은 <p>/<h2> 같은 진짜 HTML 태그가 아니라,
- * "■ 소제목" 표기와 빈 줄로 문단을 구분하는 일반 텍스트에 가깝습니다. 사용자가 태그를
- * 직접 달지 않아도 되도록, 이 관례를 실제 HTML 구조로 자동 변환합니다. 이미 실제
- * HTML 태그가 있으면 이중 변환을 막기 위해 그대로 둡니다. */
-function autoFormatToHtml(text:string):string{
-  if(/<(p|h[1-6]|ul|ol|li|div|figure)[\s>]/i.test(text))return text; // 이미 실제 HTML이면 그대로 둡니다.
-  const paragraphs=text.split(/\n\s*\n/).map(p=>p.trim()).filter(Boolean);
-  return paragraphs.map(p=>{
-    if(/^\[사진\d*\]$/.test(p))return `<figure class="blog-photo-slot">${p}</figure>`;
-    if(/^■\s*/.test(p)){
-      // "■ 소제목" 바로 다음 줄에 본문이 이어 붙는 경우가 많아, 첫 줄만 소제목(h3)으로
-      // 빼고 나머지는 별도 문단(p)으로 분리합니다 - 안 그러면 본문까지 h3 안에 갇힙니다.
-      const lines=p.split('\n');
-      const heading=lines[0].replace(/^■\s*/,'');
-      const rest=lines.slice(1).join('<br>').trim();
-      return rest?`<h3>${heading}</h3>\n<p>${rest}</p>`:`<h3>${heading}</h3>`;
-    }
-    return `<p>${p.replace(/\n/g,'<br>')}</p>`;
-  }).join('\n');
-}
+
 
 function statusTone(status:string){return status==='published'||status==='approved'?'success':status==='revision'?'danger':status==='review'||status==='publish-ready'?'warning':'neutral'}
 
@@ -86,6 +67,11 @@ export function BlogProductionPage(){
   const [aiStatus,setAiStatus]=useState<{configured:boolean;provider:string|null}|null>(null);
   const [generating,setGenerating]=useState(false);
   const [pendingIdempotencyKey,setPendingIdempotencyKey]=useState<string|null>(null);
+  // 재시도 상태를 하나로 뭉뚱그리지 않고 이유를 구분합니다:
+  // - 'save_failed': 오토포스트 Pro 생성은 확실히 끝났는데(과금됐을 수 있음) HOWTOM 저장만 실패
+  // - 'request_uncertain': 네트워크 오류 등으로 오토포스트 Pro 호출 자체 결과를 알 수 없음
+  //   (과금됐는지 여부도 불확실 - 그래도 같은 키로 재시도하면 중복 과금은 막힙니다)
+  const [retryReason,setRetryReason]=useState<'save_failed'|'request_uncertain'|null>(null);
   const [lengthChoice,setLengthChoice]=useState<'short'|'medium'|'long'|'auto'>('medium');
   const [numImages,setNumImages]=useState(1);
   const [autopostSeat,setAutopostSeat]=useState<{plan:'trial'|'paid';trial_remaining?:number;status:string}|null>(null);
@@ -169,7 +155,8 @@ export function BlogProductionPage(){
       // 저장까지 완전히 끝난 경우에만 키를 지웁니다. saveWarning이 있으면(외부 생성은
       // 끝났지만 HOWTOM 저장은 실패한 상태) 키를 그대로 남겨둬서, 사용자가 다시 눌러도
       // 외부 API를 또 호출하지 않고 저장만 재시도하도록 합니다.
-      if(!result.saveWarning)setPendingIdempotencyKey(null);
+      if(!result.saveWarning){setPendingIdempotencyKey(null);setRetryReason(null);}
+      else setRetryReason('save_failed');
       const message=
         result.saveWarning?result.saveWarning
         :result.replayed?'이전 생성 결과를 다시 불러왔습니다(중복 생성되지 않았습니다).'
@@ -183,6 +170,8 @@ export function BlogProductionPage(){
     catch(e){
       if(e instanceof OverageConfirmRequiredError){setOverageConfirm({message:e.message});setGenerating(false);return;}
       // idempotencyKey는 유지합니다 - 다시 시도할 때 같은 키로 재시도해야 중복 과금을 막을 수 있습니다.
+      // 다만 이건 "저장 실패"가 아니라 "요청 자체 결과 불확실"이라 다른 사유로 표시합니다.
+      setRetryReason('request_uncertain');
       setNotice(e instanceof Error?e.message:'초안 생성에 실패했습니다.');
     }
     finally{setGenerating(false);}
@@ -262,8 +251,9 @@ export function BlogProductionPage(){
         {!autopostIndustrySupported&&<div className="blog26-usage-warn" style={{marginBottom:8}}>현재 오토포스트 Pro 블로그 생성이 지원되지 않는 업종입니다. (병원·치과·한의원·동물병원·세무·학원만 지원)</div>}
         {autopostIndustrySupported&&autopostMissingBizNo&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이 광고주는 사업자등록번호가 등록되어 있지 않습니다. HOWTOM Universe의 광고주 정보에서 먼저 입력하세요.</div>}
         {aiStatus?.provider==='autopost-pro'&&overrideLooksStale&&<div className="blog26-usage-warn" style={{marginBottom:8}}>⚠ 이 광고주의 "오토포스트 Pro 업종 코드"에 <b>"{currentAdvertiser?.autopost_pro_industry}"</b>가 들어있어 실제 업종({currentAdvertiser?.industry})과 다르게 이 값이 우선 적용됩니다. medical/tax/academy/vet 중 하나가 아니라면 업종을 바꾸신 뒤 남은 예전 값일 수 있으니, HOWTOM Universe에서 이 필드를 비워두거나 올바른 코드로 수정하세요.</div>}
-        {pendingIdempotencyKey&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 생성이 완료됐지만 저장에 실패했습니다(이미 과금됐을 수 있음). 아래 버튼은 재생성하지 않고 저장만 다시 시도합니다.</div>}
-        <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured||generating||!autopostIndustrySupported||autopostMissingBizNo}>{generating?<>{pendingIdempotencyKey?'저장 재시도 중...':'생성 중... (잠시만요)'}</>:pendingIdempotencyKey?<><Save size={16}/> 저장만 다시 시도</>:<><Sparkles size={16}/> 초안 만들기</>}</button>
+        {retryReason==='save_failed'&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 생성이 완료됐지만 저장에 실패했습니다(이미 과금됐을 수 있음). 아래 버튼은 재생성하지 않고 저장만 다시 시도합니다. 이미 방금 저장에 성공했다면(화면이 갱신 안 됐을 수 있음) <button type="button" className="btn secondary mini" onClick={()=>void reload()}>새로고침</button>으로 최신 상태를 다시 불러오거나, 이 시도를 포기하고 <button type="button" className="btn secondary mini" onClick={()=>{if(confirm('이 생성 시도를 포기하고 새로 만드시겠어요? 방금 그 초안이 이미 저장됐다면 그대로 남고, 새로 누르면 새로운 생성 1건으로 별도 처리됩니다.')){setPendingIdempotencyKey(null);setRetryReason(null);}}}>취소하고 새로 만들기</button>를 누르세요.</div>}
+        {retryReason==='request_uncertain'&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 요청이 네트워크 오류 등으로 결과를 확인하지 못했습니다(생성됐는지 불확실). 아래 버튼을 다시 누르면 같은 시도로 안전하게 재시도합니다(중복 과금되지 않습니다). <button type="button" className="btn secondary mini" onClick={()=>{if(confirm('이 시도를 포기하고 완전히 새로 시작하시겠어요?')){setPendingIdempotencyKey(null);setRetryReason(null);}}}>취소하고 새로 만들기</button></div>}
+        <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured||generating||!autopostIndustrySupported||autopostMissingBizNo}>{generating?<>{retryReason==='save_failed'?'저장 재시도 중...':retryReason==='request_uncertain'?'재시도 중...':'생성 중... (잠시만요)'}</>:retryReason==='save_failed'?<><Save size={16}/> 저장만 다시 시도</>:retryReason==='request_uncertain'?<><Sparkles size={16}/> 다시 시도</>:<><Sparkles size={16}/> 초안 만들기</>}</button>
         <small className="blog26-help">{aiStatus?.provider==='autopost-pro'?'오토포스트 Pro가 업종별 규정을 반영해 초안을 작성합니다.':aiStatus?.configured?'제휴 업체 AI가 초안을 작성합니다.':'블로그 AI 원고 생성은 제휴 업체 API가 확정된 뒤 연결됩니다(연동 필요). 현재는 직접 작성·편집·저장 기능을 사용하세요.'}</small>
         {aiStatus?.provider==='autopost-pro'&&autopostSeat&&<div className="blog26-usage-box">
           {autopostSeat.plan==='trial'?<span>무료 체험 <b>{autopostSeat.trial_remaining ?? '-'}</b>건 남음</span>:<span>유료 플랜 사용 중</span>}
@@ -388,17 +378,14 @@ function PhotoPanel({assets,project,onAttach,onRegister}:{assets:BlogAsset[];pro
  * 실제 서식으로 렌더링)이고, 'HTML 편집'을 누르면 원본 태그를 직접 고칠 수 있습니다. */
 function HtmlBlockEditor({block,locked,onChange}:{block:BlogBlock;locked:boolean;onChange:(change:Partial<BlogBlock>)=>void}){
   const [mode,setMode]=useState<'preview'|'edit'>('preview');
-  const alreadyFormatted=/<(p|h[1-6]|ul|ol|li|div|figure)[\s>]/i.test(block.text||'');
   return <div className="blog26-html-block">
     <div className="blog26-html-toggle">
       <button type="button" className={mode==='preview'?'active':''} onClick={()=>setMode('preview')}>미리보기</button>
       <button type="button" className={mode==='edit'?'active':''} onClick={()=>setMode('edit')} disabled={locked}>HTML 편집</button>
-      {!alreadyFormatted&&<button type="button" className="btn secondary mini" onClick={()=>onChange({text:autoFormatToHtml(block.text||'')})} disabled={locked} title="■ 소제목, 빈 줄 구분 문단을 실제 h3·p 태그로 자동 변환합니다.">자동 서식 적용</button>}
     </div>
     {mode==='preview'
       ? <div className="blog26-html-preview" dangerouslySetInnerHTML={{__html:sanitizeHtml(block.text||'')}}/>
       : <textarea rows={14} className="blog26-html-source" value={block.text||''} onChange={e=>onChange({text:e.target.value})} placeholder="HTML 소스" disabled={locked}/>}
-    {!alreadyFormatted&&<small className="blog26-help">오토포스트 Pro 원문은 아직 실제 태그 없이 "■ 소제목"·빈 줄 구분 형태입니다 - "자동 서식 적용"을 누르면 실제 소제목·문단 태그로 바뀌어, 블로그에 발행했을 때 서식이 제대로 보입니다.</small>}
   </div>;
 }
 function AutopostProPanel({project,advertiser,seat,industryCode}:{project:BlogProject;advertiser:ReturnType<typeof useAdvertisers>[0][number]|null;seat:{plan:'trial'|'paid';trial_remaining?:number;status:string}|null;industryCode:string}){
