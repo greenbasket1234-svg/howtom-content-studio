@@ -37,6 +37,50 @@ const LENGTH_OPTIONS:{value:'short'|'medium'|'long'|'auto';label:string;targetLe
 function sanitizeHtml(html:string):string{
   return DOMPurify.sanitize(html,{ADD_ATTR:['target']});
 }
+/** "전체 복사"용 - 제목과 모든 블록을 하나의 완성된 HTML 문서로 만듭니다. 'html'
+ * 타입 블록(오토포스트 Pro 원문)은 이미 HTML이라 그대로 쓰고, 나머지 수동 블록
+ * 타입(소제목·목록·인용문 등)은 각각에 맞는 태그로 감쌉니다. 이스케이프 처리로
+ * 사용자가 입력한 텍스트에 있는 <, > 같은 문자가 태그로 오해되지 않게 합니다.
+ */
+function escapeHtml(text:string):string{
+  return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function buildBlogHtml(project:BlogProject):string{
+  const titleHtml=`<h1>${escapeHtml(project.selectedTitle||'')}</h1>`;
+  const blocksHtml=project.blocks.map(b=>{
+    const text=b.text||'';
+    switch(b.type){
+      case 'html': return text; // 이미 완성된 HTML이므로 그대로 사용합니다.
+      case 'h2': return `<h2>${escapeHtml(b.title||text)}</h2>`;
+      case 'h3': return `<h3>${escapeHtml(b.title||text)}</h3>`;
+      case 'quote': return `<blockquote>${escapeHtml(text)}</blockquote>`;
+      case 'list': return `<ul>${text.split('\n').filter(Boolean).map(line=>`<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
+      case 'faq': return `<p><strong>${escapeHtml(b.title||'')}</strong><br>${escapeHtml(text)}</p>`;
+      case 'cta': return `<p><strong>${escapeHtml(text)}</strong></p>`;
+      case 'divider': return '<hr>';
+      case 'image': return text?`<figure><img src="${text}" alt=""/></figure>`:'';
+      default: return text?`<p>${escapeHtml(text).replace(/\n/g,'<br>')}</p>`:'';
+    }
+  }).filter(Boolean).join('\n');
+  return sanitizeHtml(`${titleHtml}\n${blocksHtml}`);
+}
+/** 네이버 블로그 등 서식을 지원하는 에디터에 붙여넣었을 때 굵은 글씨·소제목 같은
+ * 서식이 그대로 살아있도록, HTML과 순수 텍스트 두 형식을 함께 클립보드에 담습니다.
+ * ClipboardItem을 지원 안 하는 브라우저(일부 모바일)에서는 텍스트만으로 대체합니다. */
+async function copyRich(htmlString:string):Promise<void>{
+  const container=document.createElement('div');
+  container.innerHTML=htmlString;
+  const text=container.innerText;
+  try{
+    const item=new ClipboardItem({
+      'text/html': new Blob([htmlString],{type:'text/html'}),
+      'text/plain': new Blob([text],{type:'text/plain'}),
+    });
+    await navigator.clipboard.write([item]);
+  }catch{
+    await navigator.clipboard.writeText(text);
+  }
+}
 /** TXT 내보내기용 - HTML 태그를 전부 제거하고 텍스트만 남깁니다. */
 function stripHtml(html:string):string{
   return html.replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
@@ -280,7 +324,7 @@ export function BlogProductionPage(){
           <header><span>{BLOCK_LABEL[block.type]}</span>{!project.medicalReview.locked&&<button className="icon-btn danger" onClick={()=>removeBlock(block.blockId)}><Trash2 size={14}/></button>}</header>
           {block.type==='divider'?<hr/>:block.type==='html'?<HtmlBlockEditor block={block} locked={project.medicalReview.locked} onChange={change=>updateBlock(block.blockId,change)}/>:<>{block.type==='image'&&<div className="blog26-image-block">{block.assetId?(()=>{const a=assets.find(x=>x.assetId===block.assetId);return <><ImageIcon size={24}/><b>{a?.name||block.assetId}</b><span>{a?.url||'서버 자산'}</span></>})():<><ImageIcon size={24}/><span>사진을 연결하세요.</span></>}<button className="btn secondary" onClick={()=>{setActiveSide('photos');setAssetOpen(true)}} disabled={project.medicalReview.locked}>사진 선택</button></div>}<input value={block.title||''} onChange={e=>updateBlock(block.blockId,{title:e.target.value})} placeholder="블록 제목" disabled={project.medicalReview.locked}/>{block.type!=='image'&&<textarea rows={block.type==='paragraph'?7:4} value={block.text||''} onChange={e=>updateBlock(block.blockId,{text:e.target.value})} placeholder="내용을 입력하세요." disabled={project.medicalReview.locked}/>}</>}
         </article>)}</div>
-        <div className="blog26-editor-actions"><button className="btn secondary" onClick={()=>navigator.clipboard.writeText(`${project.selectedTitle}\n\n${project.blocks.map(b=>`${b.title||''}\n${b.text||''}`).join('\n\n')}`)}><ClipboardCopy size={15}/> 전체 복사</button><button className="btn primary" onClick={()=>void save()}><Save size={15}/> 저장</button></div>
+        <div className="blog26-editor-actions"><button className="btn secondary" onClick={()=>void copyRich(buildBlogHtml(project))}><ClipboardCopy size={15}/> 전체 복사</button><button className="btn primary" onClick={()=>void save()}><Save size={15}/> 저장</button></div>
       </main>
 
     </div>
