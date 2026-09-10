@@ -23,21 +23,28 @@ export function ProductionLibraryPage() {
 
   const load = async () => {
     setLoading(true);
-    // 4개 서로 다른 백엔드를 병렬로 조회합니다. 하나가 실패해도(예: 아직 데이터 없음) 나머지는 보여줍니다.
-    const [ads, blogs, docs, scripts] = await Promise.all([
-      adApi.projects().catch(() => []),
-      blogApi.projects().catch(() => []),
-      documentApi.projects().catch(() => []),
-      videoScriptApi.projects().catch(() => []),
-    ]);
-    const merged: LibraryItem[] = [
-      ...ads.map(p => ({ id: p.projectId, kind: '광고' as const, title: p.title, advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/ad?project=${p.projectId}`, onDelete: () => adApi.deleteProject(p.projectId) })),
-      ...blogs.map(p => ({ id: p.projectId, kind: '블로그' as const, title: p.selectedTitle || p.primaryKeyword || '제목 미정', advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/blog?project=${p.projectId}`, onDelete: () => blogApi.deleteProject(p.projectId) })),
-      ...docs.map(p => ({ id: p.projectId, kind: '문서' as const, title: p.title, advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/document?project=${p.projectId}`, onDelete: () => documentApi.deleteProject(p.projectId) })),
-      ...scripts.map(p => ({ id: p.projectId, kind: '영상 대본' as const, title: p.title, advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/video-script?project=${p.projectId}`, onDelete: () => videoScriptApi.deleteProject(p.projectId) })),
-    ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    setItems(merged);
-    setLoading(false);
+    try {
+      // 4개 서로 다른 백엔드를 병렬로 조회합니다. 하나가 실패해도(예: 아직 데이터 없음) 나머지는 보여줍니다.
+      const [ads, blogs, docs, scripts] = await Promise.all([
+        adApi.projects().catch(() => []),
+        blogApi.projects().catch(() => []),
+        documentApi.projects().catch(() => []),
+        videoScriptApi.projects().catch(() => []),
+      ]);
+      const merged: LibraryItem[] = [
+        ...ads.map(p => ({ id: p.projectId, kind: '광고' as const, title: p.title, advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/ad?project=${p.projectId}`, onDelete: () => adApi.deleteProject(p.projectId) })),
+        ...blogs.map(p => ({ id: p.projectId, kind: '블로그' as const, title: p.selectedTitle || p.primaryKeyword || '제목 미정', advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/blog?project=${p.projectId}`, onDelete: () => blogApi.deleteProject(p.projectId) })),
+        ...docs.map(p => ({ id: p.projectId, kind: '문서' as const, title: p.title, advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/document?project=${p.projectId}`, onDelete: () => documentApi.deleteProject(p.projectId) })),
+        ...scripts.map(p => ({ id: p.projectId, kind: '영상 대본' as const, title: p.title, advertiserId: p.advertiserId, status: p.status, updatedAt: p.updatedAt, openRoute: `/production/video-script?project=${p.projectId}`, onDelete: () => videoScriptApi.deleteProject(p.projectId) })),
+        // updatedAt이 비어있는 예전 데이터가 하나라도 있으면 .localeCompare()가 예외를 던져서
+        // 화면이 "불러오는 중..."에 영원히 갇히는 문제가 있었습니다 - 안전하게 처리합니다.
+      ].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+      setItems(merged);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '제작물 목록을 불러오지 못했습니다.');
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => { void load(); }, []);
 
