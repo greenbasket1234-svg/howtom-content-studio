@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Check, ChevronLeft, Plus, Search, Trash2 } from 'lucide-react';
+import { Check, ChevronLeft, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
+import { apiFetch } from '../../context/AuthContext';
 import { documentApi } from './documentApi';
 import type { DocumentBlock, DocumentBlockType, DocumentProject } from './documentTypes';
 
@@ -52,6 +53,19 @@ export function DocumentWritingPage() {
     catch (e) { setNotice(e instanceof Error ? e.message : '저장하지 못했습니다.'); }
   };
   const patchLocal = (changes: Partial<DocumentProject>) => project && setProject({ ...project, ...changes });
+  const [aiLoading, setAiLoading] = useState(false);
+  const generateWithAi = async () => {
+    if (!project) return; setAiLoading(true);
+    try {
+      const result = await apiFetch<{blocks:DocumentBlock[]}>('/api/documents/generate', { method:'POST', body: JSON.stringify({ advertiserName: project.advertiserName, documentType: project.documentType, topic: project.title }) });
+      if (result.blocks?.length) patchLocal({ blocks: result.blocks.map(b => ({ ...b, blockId: uid('doc') })) });
+      setNotice('AI가 문서 초안을 생성했습니다. 내용을 검토하고 필요한 부분을 수정해주세요.');
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : 'AI 생성에 실패했습니다.');
+    } finally {
+      setAiLoading(false);
+    }
+  };
   const save = async () => { if (!project) return; await patch(project); setNotice('저장했습니다.'); };
   const complete = async () => { await patch({ status: 'completed' }); setNotice('완료 처리했습니다.'); };
   const addBlock = (type: DocumentBlockType) => patchLocal({ blocks: [...project!.blocks, { blockId: uid('doc'), type, title: type === 'h2' ? '새 섹션' : type === 'callout' ? '핵심' : '', text: '' }] });
@@ -105,6 +119,7 @@ export function DocumentWritingPage() {
         <div className="content-section-head">
           <h3>문서 블록</h3>
           <div style={{ display: 'flex', gap: 6 }}>
+            <button className="cs-btn" onClick={()=>void generateWithAi()} disabled={aiLoading}><Sparkles size={13}/> {aiLoading?'AI 생성 중...':'AI로 초안 생성'}</button>
             <button className="cs-btn" onClick={() => addBlock('h2')}>+ 섹션</button>
             <button className="cs-btn" onClick={() => addBlock('paragraph')}>+ 본문</button>
             <button className="cs-btn" onClick={() => addBlock('callout')}>+ 콜아웃</button>

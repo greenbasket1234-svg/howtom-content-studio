@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Archive, Check, ChevronRight, Copy, FileText, Image as ImageIcon, Plus, Save, Search,
-  Trash2, Video
+  Sparkles, Trash2, Video
 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
+import { apiFetch } from '../../context/AuthContext';
 import { adApi } from './adApi';
 import type { AdCopyVariant, AdProject, AdProjectStatus } from './adTypes';
 
@@ -61,6 +62,23 @@ export function AdCreationPage() {
   const [notice,setNotice] = useState('');
   const [query,setQuery] = useState('');
   const [statusFilter,setStatusFilter] = useState<'all'|AdProjectStatus>('all');
+  const [aiLoading,setAiLoading] = useState(false);
+  const generateWithAi = async () => {
+    setAiLoading(true);
+    try {
+      const result = await apiFetch<{hooks:string[];copyVariants:AdCopyVariant[]}>('/api/ad/generate', { method:'POST', body: JSON.stringify({ advertiserName: draft.advertiserName, channel: draft.channel, objective: draft.objective, target: draft.target, keyBenefit: draft.keyBenefit, hookType: draft.hookType }) });
+      setDraft(prev => ({
+        ...prev,
+        hooks: result.hooks?.length ? result.hooks : prev.hooks,
+        copyVariants: result.copyVariants?.length ? result.copyVariants.map((v,i) => ({ ...v, variantId: prev.copyVariants[i]?.variantId || uid('variant') })) : prev.copyVariants,
+      }));
+      setNotice('AI가 후킹·카피 시안을 생성했습니다. 내용을 검토하고 필요한 부분을 수정해주세요.');
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : 'AI 생성에 실패했습니다.');
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   const filteredProjects = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -210,7 +228,7 @@ export function AdCreationPage() {
         </section>
 
         <section className="card ad26-section">
-          <div className="ad26-section-head"><div><span>STEP 2</span><h3>후킹</h3><p>AI 생성 없이 실제 사용할 후킹을 직접 작성합니다.</p></div></div>
+          <div className="ad26-section-head"><div><span>STEP 2</span><h3>후킹</h3><p>AI로 초안을 생성한 뒤 실제 사용할 후킹으로 다듬어주세요.</p></div><button className="btn secondary" onClick={()=>void generateWithAi()} disabled={aiLoading}><Sparkles size={14}/> {aiLoading?'AI 생성 중...':'AI로 후킹·카피 생성'}</button></div>
           <div className="ad26-hook-type-row">{HOOK_TYPES.map(type=><button key={type} className={draft.hookType===type?'active':''} onClick={()=>patch('hookType',type)}>{type}</button>)}</div>
           <div className="ad26-hook-grid">{draft.hooks.map((hook,index)=><label key={index}><span>{String.fromCharCode(65+index)}안 후킹</span><textarea rows={3} value={hook} onChange={e=>patch('hooks',draft.hooks.map((v,i)=>i===index?e.target.value:v))} placeholder="첫 문장에서 시선을 잡을 문구"/></label>)}</div>
         </section>

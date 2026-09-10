@@ -902,6 +902,50 @@ async function readJson(req) {
     req.on('error', reject);
   });
 }
+// ── AI 생성 (광고 제작/영상 대본/문서 작성) - HOWTOM Universe와 완전히 같은 방식입니다.
+// 같은 환경변수(AI_INSIGHTS_PROVIDER/AI_INSIGHTS_API_KEY 또는 ANTHROPIC_API_KEY)를 그대로
+// 재사용하므로, 두 서비스에 각각 따로 키를 설정할 필요 없이 하나로 통일해서 씁니다.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+function anthropicConfigured() { return Boolean(ANTHROPIC_API_KEY); }
+async function callAnthropic(systemPrompt, userPrompt) {
+  if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY가 설정되지 않았습니다.');
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 2000, system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error?.message || `Anthropic API HTTP ${res.status}`);
+  return (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+}
+const AI_INSIGHTS_PROVIDER = process.env.AI_INSIGHTS_PROVIDER || 'anthropic';
+const AI_INSIGHTS_API_KEY = process.env.AI_INSIGHTS_API_KEY || '';
+const AI_INSIGHTS_MODEL = process.env.AI_INSIGHTS_MODEL || 'gpt-4o-mini';
+function aiInsightsConfigured() {
+  if (AI_INSIGHTS_PROVIDER === 'openai') return Boolean(AI_INSIGHTS_API_KEY);
+  return anthropicConfigured();
+}
+async function callAiInsights(systemPrompt, userPrompt) {
+  if (AI_INSIGHTS_PROVIDER === 'openai') {
+    if (!AI_INSIGHTS_API_KEY) throw new Error('AI_INSIGHTS_API_KEY가 설정되지 않았습니다.');
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${AI_INSIGHTS_API_KEY}` },
+      body: JSON.stringify({ model: AI_INSIGHTS_MODEL, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], max_tokens: 2000 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || `OpenAI API HTTP ${res.status}`);
+    return data.choices?.[0]?.message?.content || '';
+  }
+  return callAnthropic(systemPrompt, userPrompt);
+}
+async function callContentAiJson(systemPrompt, userPrompt) {
+  const raw = await callAiInsights(systemPrompt, userPrompt);
+  const cleaned = raw.trim().replace(/^```json\s*|```$/g, '').replace(/^```\s*|```$/g, '');
+  return JSON.parse(cleaned);
+}
+
 function hashUserPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
@@ -1058,6 +1102,29 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 201, row);
         }
 
+        if (req.method === 'POST' && pathname === '/api/ad/generate') {
+          if (!aiInsightsConfigured()) return sendJson(res, 400, { error: `AI 광고 제작이 아직 연결되지 않았습니다(${AI_INSIGHTS_PROVIDER === 'openai' ? 'AI_INSIGHTS_API_KEY' : 'ANTHROPIC_API_KEY'} 미설정).`, configured: false });
+          const body = await readJson(req);
+          const brief = {
+            advertiserName: cleanText(body.advertiserName || '', 120), channel: cleanText(body.channel || '', 60), objective: cleanText(body.objective || '', 60),
+            target: cleanText(body.target || '', 200), keyBenefit: cleanText(body.keyBenefit || '', 300), hookType: cleanText(body.hookType || '', 60),
+          };
+          const systemPrompt = [
+            '당신은 광고 소재 기획을 돕는 카피라이터입니다.',
+            '1) 제공된 브리프 정보만 근거로 쓰고, 없는 제품 정보를 지어내지 않는다.',
+            '2) 과장·의료광고성 표현, 확정적 효과 보장 문구는 쓰지 않는다.',
+            '3) 반드시 JSON으로만 응답한다. 형식: {"hooks":["...","...","..."],"copyVariants":[{"label":"","angle":"","headline":"","description":"","body":"","cta":""}]}',
+            '4) hooks는 3개, copyVariants는 3개 작성한다.',
+          ].join('\n');
+          const userPrompt = `아래 브리프로 광고 후킹 문구와 카피 시안을 작성하세요.\n${JSON.stringify(brief)}`;
+          try {
+            const parsed = await callContentAiJson(systemPrompt, userPrompt);
+            return sendJson(res, 200, { hooks: parsed.hooks || [], copyVariants: parsed.copyVariants || [] });
+          } catch (err) {
+            return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 광고 제작에 실패했습니다.' });
+          }
+        }
+
         const adProjectMatch = pathname.match(/^\/api\/ad\/projects\/([^/]+)$/);
         if (adProjectMatch && req.method === 'GET') {
           const id = decodeURIComponent(adProjectMatch[1]);
@@ -1173,6 +1240,25 @@ const server = http.createServer(async (req, res) => {
           await pgPool.query(`INSERT INTO document_projects (id, tenant_id, advertiser_id, data) VALUES ($1,$2,$3,$4)`, [row.projectId, tenantId, advRes.rows[0].id, JSON.stringify(row)]);
           return sendJson(res, 201, row);
         }
+
+        if (req.method === 'POST' && pathname === '/api/documents/generate') {
+          if (!aiInsightsConfigured()) return sendJson(res, 400, { error: `AI 문서 생성이 아직 연결되지 않았습니다(${AI_INSIGHTS_PROVIDER === 'openai' ? 'AI_INSIGHTS_API_KEY' : 'ANTHROPIC_API_KEY'} 미설정).`, configured: false });
+          const body = await readJson(req);
+          const brief = { advertiserName: cleanText(body.advertiserName || '', 120), documentType: cleanText(body.documentType || '기획서', 60), topic: cleanText(body.topic || '', 300) };
+          const systemPrompt = [
+            '당신은 마케팅 업무 문서 초안을 쓰는 보조 작성자입니다.',
+            '1) 제공된 정보만 근거로 쓰고, 없는 실적 수치를 지어내지 않는다 - 수치가 필요한 부분은 "(실제 데이터 확인 필요)"라고 표시한다.',
+            '2) 반드시 JSON 배열로만 응답한다. 각 항목 형식: {"type":"h1|h2|paragraph|callout","title":"","text":""}',
+            '3) 5~8개 블록으로 구성한다. 첫 블록은 type h1으로 문서 제목을 담는다.',
+          ].join('\n');
+          const userPrompt = `아래 정보로 "${brief.documentType}" 문서 초안을 작성하세요.\n${JSON.stringify(brief)}`;
+          try {
+            const parsed = await callContentAiJson(systemPrompt, userPrompt);
+            return sendJson(res, 200, { blocks: Array.isArray(parsed) ? parsed : [] });
+          } catch (err) {
+            return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 문서 생성에 실패했습니다.' });
+          }
+        }
         const docMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
         if (docMatch && req.method === 'GET') {
           const id = decodeURIComponent(docMatch[1]);
@@ -1215,6 +1301,29 @@ const server = http.createServer(async (req, res) => {
           row.advertiserName = advRes.rows[0].name;
           await pgPool.query(`INSERT INTO video_script_projects (id, tenant_id, advertiser_id, data) VALUES ($1,$2,$3,$4)`, [row.projectId, tenantId, advRes.rows[0].id, JSON.stringify(row)]);
           return sendJson(res, 201, row);
+        }
+
+        if (req.method === 'POST' && pathname === '/api/video-scripts/generate') {
+          if (!aiInsightsConfigured()) return sendJson(res, 400, { error: `AI 영상 대본 생성이 아직 연결되지 않았습니다(${AI_INSIGHTS_PROVIDER === 'openai' ? 'AI_INSIGHTS_API_KEY' : 'ANTHROPIC_API_KEY'} 미설정).`, configured: false });
+          const body = await readJson(req);
+          const brief = {
+            advertiserName: cleanText(body.advertiserName || '', 120), videoType: cleanText(body.videoType || '', 60), targetSeconds: Number(body.targetSeconds) || 30,
+            keyMessage: cleanText(body.keyMessage || '', 300), cta: cleanText(body.cta || '', 60),
+          };
+          const systemPrompt = [
+            '당신은 짧은 영상 광고 대본을 쓰는 카피라이터입니다.',
+            '1) 제공된 브리프만 근거로 쓰고, 없는 제품 정보를 지어내지 않는다.',
+            '2) 장면은 0초부터 targetSeconds까지 순서대로 이어지게 나누고, 장면 간 시간이 겹치지 않게 한다.',
+            '3) 반드시 JSON 배열로만 응답한다. 각 항목 형식: {"startSecond":0,"endSecond":3,"purpose":"hook|problem|solution|benefit|proof|cta|other","narration":"","caption":"","visual":""}',
+            '4) 4~6개 장면으로 나눈다. 마지막 장면의 purpose는 반드시 "cta"이고 narration에 제공된 cta 문구를 반영한다.',
+          ].join('\n');
+          const userPrompt = `아래 브리프로 영상 대본 장면을 작성하세요.\n${JSON.stringify(brief)}`;
+          try {
+            const parsed = await callContentAiJson(systemPrompt, userPrompt);
+            return sendJson(res, 200, { scenes: Array.isArray(parsed) ? parsed : [] });
+          } catch (err) {
+            return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 영상 대본 생성에 실패했습니다.' });
+          }
         }
         const vsMatch = pathname.match(/^\/api\/video-scripts\/([^/]+)$/);
         if (vsMatch && req.method === 'GET') {

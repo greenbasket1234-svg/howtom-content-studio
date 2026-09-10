@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Check, ChevronLeft, ClipboardCopy, Plus, Search, Trash2 } from 'lucide-react';
+import { Check, ChevronLeft, ClipboardCopy, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
+import { apiFetch } from '../../context/AuthContext';
 import { videoScriptApi } from './videoScriptApi';
 import type { ScenePurpose, VideoScene, VideoScriptProject } from './videoScriptTypes';
 
@@ -57,6 +58,19 @@ export function VideoScriptPage() {
     catch (e) { setNotice(e instanceof Error ? e.message : '저장하지 못했습니다.'); }
   };
   const patchLocal = (changes: Partial<VideoScriptProject>) => project && setProject({ ...project, ...changes });
+  const [aiLoading, setAiLoading] = useState(false);
+  const generateWithAi = async () => {
+    if (!project) return; setAiLoading(true);
+    try {
+      const result = await apiFetch<{scenes:VideoScene[]}>('/api/video-scripts/generate', { method:'POST', body: JSON.stringify({ advertiserName: project.advertiserName, videoType: project.videoType, targetSeconds: project.targetSeconds, keyMessage: project.keyMessage, cta: project.cta }) });
+      if (result.scenes?.length) patchLocal({ scenes: result.scenes.map((s,i) => ({ ...s, sceneId: uid('scene'), order: i+1 })) });
+      setNotice('AI가 장면을 생성했습니다. 내용을 검토하고 필요한 부분을 수정해주세요.');
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : 'AI 생성에 실패했습니다.');
+    } finally {
+      setAiLoading(false);
+    }
+  };
   const save = async () => { if (!project) return; await patch(project); setNotice('저장했습니다.'); };
   const complete = async () => { await patch({ status: 'completed' }); setNotice('완료 처리했습니다.'); };
   const scenes = project?.scenes || [];
@@ -116,7 +130,7 @@ export function VideoScriptPage() {
       </section>
 
       <section className="cs-card content-section">
-        <div className="content-section-head"><h3>장면 타임라인</h3><button className="cs-btn" onClick={() => patchLocal({ scenes: [...scenes, { sceneId: uid('scene'), order: scenes.length + 1, startSecond: total, endSecond: total + 5, purpose: 'other', visual: '', narration: '', caption: '' }] })}><Plus size={14} /> 장면 추가</button></div>
+        <div className="content-section-head"><h3>장면 타임라인</h3><button className="cs-btn" onClick={()=>void generateWithAi()} disabled={aiLoading}><Sparkles size={14}/> {aiLoading?'AI 생성 중...':'AI로 대본 생성'}</button><button className="cs-btn" onClick={() => patchLocal({ scenes: [...scenes, { sceneId: uid('scene'), order: scenes.length + 1, startSecond: total, endSecond: total + 5, purpose: 'other', visual: '', narration: '', caption: '' }] })}><Plus size={14} /> 장면 추가</button></div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {scenes.map(s => (
             <article key={s.sceneId} style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
