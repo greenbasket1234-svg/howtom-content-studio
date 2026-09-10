@@ -38,12 +38,12 @@ function Count({ value, max }: { value:string; max?:number }) {
   return <small className={max && value.length > max ? 'ad26-count over' : 'ad26-count'}>{value.length}{max ? ` / ${max}자` : '자'}</small>;
 }
 
-function blankProject(advertiserId = '', advertiserName = ''): AdProject {
+function blankProject(advertiserId = '', advertiserName = '', extra?: Partial<Pick<AdProject,'title'|'hookType'|'hooks'|'keyBenefit'|'channel'>>): AdProject {
   const stamp = now();
   return {
-    projectId:'', title:'새 광고 제작', advertiserId, advertiserName, channel:'메타', objective:'DB 수집',
-    creativeType:'정사각형 이미지', representativeKpi:'DB당 비용', target:'', keyBenefit:'', price:'', mandatoryText:'',
-    prohibitedText:'', landingUrl:'', format:'1:1', hookType:'', hooks:['','',''],
+    projectId:'', title: extra?.title || '새 광고 제작', advertiserId, advertiserName, channel: extra?.channel || '메타', objective:'DB 수집',
+    creativeType:'정사각형 이미지', representativeKpi:'DB당 비용', target:'', keyBenefit: extra?.keyBenefit || '', price:'', mandatoryText:'',
+    prohibitedText:'', landingUrl:'', format:'1:1', hookType: extra?.hookType || '', hooks: extra?.hooks || ['','',''],
     copyVariants:[emptyVariant('A안'),emptyVariant('B안'),emptyVariant('C안')],
     imagePlan:{visualType:'실사',subject:'',background:'',mainText:'',subText:'',ratio:'1:1',textRatio:'30% 이하'},
     videoPlan:{length:'30초',style:'UGC / 후기',hook3s:'',scenes:'',endingCta:'더 알아보기'},
@@ -56,7 +56,23 @@ export function AdCreationPage() {
   const [params,setParams] = useSearchParams();
   const projectId = params.get('project') || '';
   const [projects,setProjects] = useState<AdProject[]>([]);
-  const [draft,setDraft] = useState<AdProject>(() => blankProject());
+  // HOWTOM Universe의 인사이트(소재 분석·후킹 CTA 분석)에서 "이 패턴으로 제작"을 누르면
+  // 별도 로그인 없이 이 화면으로 바로 넘어오면서 광고주명·추천 후킹·핵심 소구점을 URL
+  // 파라미터로 함께 전달합니다(도메인이 달라 localStorage로는 못 넘기므로 URL로 전달).
+  const [draft,setDraft] = useState<AdProject>(() => {
+    const patternTitle = params.get('patternTitle');
+    const patternHook = params.get('patternHook');
+    const patternBenefit = params.get('patternBenefit');
+    const patternChannel = params.get('patternChannel');
+    if (!patternTitle && !patternHook && !patternBenefit) return blankProject();
+    return blankProject('', '', {
+      title: patternTitle || undefined,
+      hookType: patternHook || undefined,
+      hooks: patternHook ? [patternHook, '', ''] : undefined,
+      keyBenefit: patternBenefit || undefined,
+      channel: patternChannel || undefined,
+    });
+  });
   const [loading,setLoading] = useState(true);
   const [saving,setSaving] = useState(false);
   const [notice,setNotice] = useState('');
@@ -118,10 +134,16 @@ export function AdCreationPage() {
 
   useEffect(()=>{ void reload(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ },[projectId]);
   useEffect(()=>{
-    if (projectId || isAllSelected) return;
+    if (projectId || draft.projectId) return;
+    const patternAdvertiser = params.get('patternAdvertiser');
+    if (patternAdvertiser) {
+      const byName = advertisers.find(a=>a.name===patternAdvertiser);
+      if (byName) { setDraft(prev=>({...prev,advertiserId:byName.id,advertiserName:byName.name})); return; }
+    }
+    if (isAllSelected) return;
     const adv = advertisers.find(a=>a.id===globalAdvertiserId);
-    if (adv && !draft.projectId) setDraft(prev=>({...prev,advertiserId:adv.id,advertiserName:adv.name}));
-  },[globalAdvertiserId,isAllSelected,advertisers,projectId,draft.projectId]);
+    if (adv) setDraft(prev=>({...prev,advertiserId:adv.id,advertiserName:adv.name}));
+  },[globalAdvertiserId,isAllSelected,advertisers,projectId,draft.projectId,params]);
 
   const patch = <K extends keyof AdProject>(key:K,value:AdProject[K]) => {
     setDraft(prev=>{
