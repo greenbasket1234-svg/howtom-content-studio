@@ -78,6 +78,7 @@ export function AdCreationPage() {
   const [notice,setNotice] = useState('');
   const [query,setQuery] = useState('');
   const [statusFilter,setStatusFilter] = useState<'all'|AdProjectStatus>('all');
+  const [viewMode,setViewMode] = useState<'editor'|'list'>('editor');
   const [aiLoading,setAiLoading] = useState(false);
   const generateWithAi = async () => {
     setAiLoading(true);
@@ -192,6 +193,15 @@ export function AdCreationPage() {
       setNotice('광고 제작 프로젝트를 삭제했습니다.');
     } catch(e) { setNotice(e instanceof Error?e.message:'삭제하지 못했습니다.'); }
   };
+  const removeById = async (id: string, title: string) => {
+    if (!window.confirm(`"${title || '제목 미정'}" 프로젝트를 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    try {
+      await adApi.deleteProject(id);
+      setProjects(prev=>prev.filter(p=>p.projectId!==id));
+      if (draft.projectId === id) { setParams({}); setDraft(blankProject()); }
+      setNotice('광고 제작 프로젝트를 삭제했습니다.');
+    } catch(e) { setNotice(e instanceof Error?e.message:'삭제하지 못했습니다.'); }
+  };
 
   const duplicate = () => {
     const copy = {...draft,projectId:'',title:`${draft.title || '광고 제작'} 복제`,status:'draft' as AdProjectStatus,createdAt:now(),updatedAt:now(),copyVariants:draft.copyVariants.map(v=>({...v,variantId:uid('variant')}))};
@@ -203,7 +213,7 @@ export function AdCreationPage() {
   const isVideo = draft.creativeType.includes('영상');
 
   return <div className="ad26-page">
-    <PageHeader title="광고 제작" description="광고 브리프·후킹·카피·CTA·이미지/영상 기획을 한 화면에서 작성하고 광고주별로 저장합니다." action={<div className="ad26-header-actions"><button className="btn secondary" onClick={newProject}><Plus size={15}/> 새 광고</button><button className="btn secondary" disabled={saving} onClick={()=>void save()}><Save size={15}/> 임시 저장</button><button className="btn primary" disabled={saving} onClick={()=>void save('completed')}><Check size={15}/> 제작 완료</button></div>} />
+    <PageHeader title="광고 제작" description="광고 브리프·후킹·카피·CTA·이미지/영상 기획을 한 화면에서 작성하고 광고주별로 저장합니다." action={<div className="ad26-header-actions"><button className="btn secondary" onClick={()=>setViewMode(viewMode==='list'?'editor':'list')}>{viewMode==='list'?'편집 화면으로':'목록 보기'}</button><button className="btn secondary" onClick={newProject}><Plus size={15}/> 새 광고</button><button className="btn secondary" disabled={saving} onClick={()=>void save()}><Save size={15}/> 임시 저장</button><button className="btn primary" disabled={saving} onClick={()=>void save('completed')}><Check size={15}/> 제작 완료</button></div>} />
     {notice && <div className="ad26-notice">{notice}</div>}
 
     <section className="ad26-kpis">
@@ -214,6 +224,42 @@ export function AdCreationPage() {
       <article><span>제작 완료</span><b>{projectCounts.completed}</b></article>
     </section>
 
+    {viewMode==='list' ? (
+      <section className="card ad26-section">
+        <div className="ad26-section-head">
+          <div><h3>광고 프로젝트 목록</h3><p>{filteredProjects.length}개 · 클릭해서 열거나 바로 삭제할 수 있습니다.</p></div>
+          <div className="ad26-inline-actions">
+            <div className="ad26-search"><Search size={14}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="프로젝트 검색"/></div>
+            <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value as 'all'|AdProjectStatus)}><option value="all">전체 상태</option>{Object.entries(STATUS_LABEL).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select>
+          </div>
+        </div>
+        {loading && <p className="ad26-empty">불러오는 중...</p>}
+        {!loading && !filteredProjects.length && <p className="ad26-empty">저장된 광고 제작 프로젝트가 없습니다.</p>}
+        {!loading && filteredProjects.length > 0 && (
+          <div style={{overflowX:'auto'}}>
+            <table className="ad26-list-table">
+              <thead><tr><th>제목</th><th>광고주</th><th>매체</th><th>목적</th><th>상태</th><th>수정일</th><th></th></tr></thead>
+              <tbody>
+                {filteredProjects.map(p=>(
+                  <tr key={p.projectId}>
+                    <td><b>{p.title || '제목 미정'}</b></td>
+                    <td>{p.advertiserName}</td>
+                    <td>{p.channel}</td>
+                    <td>{p.objective}</td>
+                    <td><span className={`ad26-status ${STATUS_TONE[p.status]}`}>{STATUS_LABEL[p.status]}</span></td>
+                    <td>{fmt(p.updatedAt)}</td>
+                    <td style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+                      <button className="btn mini" onClick={()=>{setParams({project:p.projectId});setViewMode('editor');}}>열기</button>
+                      <button className="btn mini danger" onClick={()=>void removeById(p.projectId,p.title)}><Trash2 size={13}/></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    ) : (
     <div className="ad26-layout">
       <aside className="card ad26-projects">
         <div className="ad26-panel-head"><div><h3>광고 프로젝트</h3><small>{filteredProjects.length}개 표시</small></div><button className="btn mini" onClick={newProject}><Plus size={13}/></button></div>
@@ -292,5 +338,6 @@ export function AdCreationPage() {
         </section>
       </main>
     </div>
+    )}
   </div>;
 }
