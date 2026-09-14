@@ -2099,6 +2099,17 @@ const server = http.createServer(async (req, res) => {
           if (!ctxCanAccessAdvertiser(payload, projectRow.rows[0].advertiser_id)) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
           const verifiedAdvertiserId = cleanText(projectRow.rows[0].data?.advertiserId || '', 120);
 
+          // HOWTOM 자체 구독 한도(예: "월 60편")를 오토포스트 Pro 호출 전에 먼저 확인합니다.
+          // 이건 오토포스트 Pro(외부 공급사)의 기본량·초과 과금과는 완전히 별개의 검사입니다 -
+          // 공급사 쪽 한도는 confirmOverage로 사용자 동의를 받는 기존 흐름을 그대로 두고,
+          // 여기서는 "HOWTOM이 판매한 구독 상품의 월간 한도"만 봅니다. idempotencyKey를
+          // 그대로 예약 키로 재사용해서, 같은 시도를 재시도해도 사용량이 중복 차감되지
+          // 않습니다(오토포스트 Pro의 idempotency 보장과는 독립적으로 HOWTOM 쪽도 안전합니다).
+          const blogUsageReservation = await reserveUsage(tenantId, verifiedAdvertiserId, 'blog', 'generate', idempotencyKey);
+          if (!blogUsageReservation.reserved) {
+            return sendJson(res, 403, { error: blogUsageReservation.check?.reason || '이번 달 블로그 생성 한도를 초과했습니다.', code: 'howtom_quota_exceeded', usage: blogUsageReservation.check });
+          }
+
           const brief = {
             advertiserId: verifiedAdvertiserId,
             industry: cleanText(body.industry || '업종 무관', 60), platform: cleanText(body.platform || '블로그', 60),
@@ -2142,6 +2153,8 @@ const server = http.createServer(async (req, res) => {
           let genResult;
           if (reqRow?.status === 'ai_completed') {
             genResult = sanitizeDeep({ ...reqRow.result, billing: reqRow.billing });
+            // AI는 이미 과거 요청에서 성공했으므로, HOWTOM 자체 한도도 지금 확정합니다.
+            await confirmUsageReservation(blogUsageReservation.event?.id);
           } else {
             // 외부 호출 전에 먼저 "처리 중" 상태를 원자적으로 등록합니다(UNIQUE 제약이
             // 동시 등록을 막아줍니다) - 같은 키로 동시에 두 요청이 들어와도 AI가 두 번
@@ -2166,12 +2179,17 @@ const server = http.createServer(async (req, res) => {
                 `UPDATE blog_generation_requests SET status='ai_completed', billing=$2, result=$3, provider_draft_id=$4, updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$5`,
                 [tenantId, JSON.stringify(genResult.billing || null), JSON.stringify(genResult), genResult.providerDraftId || null, idempotencyKey]
               );
+              // 오토포스트 Pro 호출이 성공했으니 HOWTOM 자체 월간 한도도 이제 확정합니다.
+              await confirmUsageReservation(blogUsageReservation.event?.id);
             } catch (error) {
               // 확실한 실패입니다(외부 공급사가 에러를 반환) - failed로 표시해 재시도를 허용합니다.
               // 초과 과금 확인이 필요한 409는 "실패"가 아니라 "사용자 결정 대기"이므로 failed로
               // 표시하지 않습니다 - 그래야 같은 키로 confirmOverage만 바꿔 재개할 수 있습니다.
+              // HOWTOM 자체 한도 예약도 같은 원칙으로 처리합니다: 확실한 실패면 반환하고,
+              // 사용자 결정 대기 중이면 그대로 pending으로 둡니다(같은 키로 재시도 시 재사용됨).
               if (error?.code !== 'overage_confirm_required') {
                 await pgPool.query(`UPDATE blog_generation_requests SET status='failed', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
+                await refundUsageReservation(blogUsageReservation.event?.id);
               }
               const status = error?.code === 'overage_confirm_required' ? 409 : (error?.status || 502);
               return sendJson(res, status, { error: error instanceof Error ? error.message : 'AI 원고 생성에 실패했습니다.', code: error?.code });
