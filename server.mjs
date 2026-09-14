@@ -738,14 +738,24 @@ async function ensureAutopostProSeatsTable() {
       project_id TEXT,
       idempotency_key TEXT NOT NULL,
       provider_draft_id TEXT,
-      status TEXT NOT NULL DEFAULT 'requested',
+      status TEXT NOT NULL DEFAULT 'requested', -- requested|processing|ai_completed|completed|failed
       billing JSONB,
       result JSONB,
+      -- 같은 idempotency_key로 다른 브리프(키워드·업종 등)가 오면 거절하기 위한 지문입니다.
+      -- confirmOverage(초과 과금 동의) 값은 지문에서 제외합니다 - 이건 "같은 요청을 계속
+      -- 진행할지"에 대한 사용자 의사결정이지, 생성 내용 자체를 바꾸는 값이 아니기 때문입니다.
+      brief_fingerprint TEXT,
       requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       completed_at TIMESTAMPTZ,
       UNIQUE(idempotency_key)
     );
   `);
+  await pgPool.query(`ALTER TABLE blog_generation_requests ADD COLUMN IF NOT EXISTS brief_fingerprint TEXT`);
+  await pgPool.query(`ALTER TABLE blog_generation_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`);
+  // 같은 tenant_id 안에서도 idempotency_key는 항상 유일해야 안전합니다(이미 UNIQUE지만,
+  // tenant_id를 함께 넣어 여러 테넌트를 운영하게 되어도 안전하도록 복합 인덱스도 둡니다).
+  await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_blog_gen_requests_tenant_key ON blog_generation_requests(tenant_id, idempotency_key)`);
   // 오토포스트 Pro의 업종별 규정검수(/v1/compliance) 결과를 HOWTOM 자체 사전점검과
   // 구분해서 보관합니다 - 둘은 서로 다른 검수이므로 하나가 다른 하나를 대체하지 않습니다.
   await pgPool.query(`
@@ -940,6 +950,92 @@ async function callAiInsights(systemPrompt, userPrompt) {
   }
   return callAnthropic(systemPrompt, userPrompt);
 }
+// ── 구독 한도·사용량 (Universe와 같은 DB의 advertiser_subscriptions/usage_events 재사용) ──
+// Universe에 있는 checkFeature/reserveUsage와 완전히 같은 로직입니다. 예전엔 Content
+// Studio의 생성 경로(블로그/광고/문서/영상 대본)가 이 시스템과 전혀 연결되어 있지 않아서,
+// 구독 상품의 "월 N편" 한도가 실제로는 강제되지 않았습니다.
+function getFeatureLimit(sub, feature) {
+  const e = sub.entitlements || {};
+  if (feature === 'blog') return e.blogEnabled === false ? 0 : e.blogPostsPerMonth;
+  if (feature === 'video-script') return e.videoScriptsPerMonth;
+  if (feature === 'document') return e.documentsPerMonth;
+  if (feature === 'ad-creation') return e.adCreationsPerMonth;
+  return undefined;
+}
+/**
+ * 원자적 사용량 예약 - Universe의 reserveUsage()와 동일합니다. sourceId(idempotency key)로
+ * 재시도를 안전하게 처리하고, advisory lock으로 동시 요청의 경쟁 상태를 막습니다.
+ */
+async function reserveUsage(tenantId, advertiserId, feature, action, sourceId, quantity = 1) {
+  const client = await pgPool.connect();
+  try {
+    await client.query('BEGIN');
+    if (sourceId) {
+      const existing = await client.query(
+        `SELECT * FROM usage_events WHERE advertiser_id=$1 AND feature=$2 AND action=$3 AND source_id=$4 LIMIT 1`,
+        [advertiserId, feature, action, sourceId]
+      );
+      if (existing.rows.length) {
+        await client.query('COMMIT');
+        return { reserved: true, replayed: true, event: existing.rows[0], check: null };
+      }
+    }
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`usage:${advertiserId}:${feature}`]);
+    const subRes = await client.query('SELECT * FROM advertiser_subscriptions WHERE advertiser_id = $1', [advertiserId]);
+    let sub = subRes.rows[0];
+    if (!sub) {
+      const renewsAt = new Date(); renewsAt.setMonth(renewsAt.getMonth() + 1);
+      const insertSub = await client.query(
+        `INSERT INTO advertiser_subscriptions (tenant_id, advertiser_id, plan_name, status, entitlements, renews_at, note)
+         VALUES ($1,$2,'미설정','active',$3,$4,'구독 상품이 아직 지정되지 않았습니다.') RETURNING *`,
+        [tenantId, advertiserId, JSON.stringify({ blogEnabled: true }), renewsAt.toISOString()]
+      );
+      sub = insertSub.rows[0];
+    }
+    const limit = getFeatureLimit(sub, feature);
+    const statusOk = ['trial', 'active'].includes(sub.status);
+    const enabled = feature !== 'blog' || sub.entitlements?.blogEnabled !== false;
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+    const usedRes = await client.query(
+      `SELECT COALESCE(SUM(quantity),0) as total FROM usage_events
+       WHERE advertiser_id=$1 AND feature=$2 AND status IN ('confirmed','pending') AND created_at >= $3 AND created_at < $4`,
+      [advertiserId, feature, monthStart, nextMonthStart]
+    );
+    const used = Number(usedRes.rows[0].total) || 0;
+    const check = {
+      allowed: statusOk && enabled && (limit == null || used + quantity <= limit),
+      subscription: sub, limit: limit ?? undefined, used, remaining: limit == null ? undefined : Math.max(0, limit - used),
+      reason: !statusOk ? `구독 상태(${sub.status})로는 이용할 수 없습니다.` : !enabled ? '기능 사용 안 함' : (limit != null && used + quantity > limit) ? '이번 달 사용 한도 초과' : '',
+    };
+    if (!check.allowed) {
+      await client.query('COMMIT');
+      return { reserved: false, replayed: false, event: null, check };
+    }
+    const insertEvent = await client.query(
+      `INSERT INTO usage_events (tenant_id, advertiser_id, subscription_id, feature, action, quantity, source_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending') RETURNING *`,
+      [tenantId, advertiserId, sub.id, feature, action, quantity, sourceId || null]
+    );
+    await client.query('COMMIT');
+    return { reserved: true, replayed: false, event: insertEvent.rows[0], check };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+async function confirmUsageReservation(eventId) {
+  if (!eventId) return;
+  await pgPool.query(`UPDATE usage_events SET status='confirmed' WHERE id=$1 AND status='pending'`, [eventId]);
+}
+async function refundUsageReservation(eventId) {
+  if (!eventId) return;
+  await pgPool.query(`UPDATE usage_events SET status='failed' WHERE id=$1 AND status='pending'`, [eventId]);
+}
+
 async function callContentAiJson(systemPrompt, userPrompt) {
   const raw = await callAiInsights(systemPrompt, userPrompt);
   const cleaned = raw.trim().replace(/^```json\s*|```$/g, '').replace(/^```\s*|```$/g, '');
@@ -988,6 +1084,94 @@ function requireAuth(req) {
   const header = String(req.headers.authorization || '');
   if (!header.startsWith('Bearer ')) return null;
   return verifyToken(header.slice(7));
+}
+
+/**
+ * ── P0 보안 수정: 통합 인증 컨텍스트 ─────────────────────────────────────
+ * 이전에는 서명만 유효하면 payload.isAdvertiserAccount 클레임값을 그대로 믿었습니다.
+ * README에 명시된 대로 JWT_SECRET을 Universe와 공유하는 설계를 유지하는 이상, 서명이
+ * 유효하다는 것은 "Universe나 Content Studio 둘 중 하나가 발급했다"는 것만 보장할 뿐,
+ * "그 사람이 지금도 유효한 권한을 가졌는지"는 보장하지 않습니다(계정 정지·소속 변경·
+ * 위조 가능한 평문 클레임 등). 그래서 매 요청마다 DB에서 실제 상태·멤버십을 다시
+ * 확인합니다.
+ *
+ * 토큰은 발급 주체에 따라 sub 유무로 1차 구분됩니다:
+ *   - sub 없음 + isAdvertiserAccount 없음  → Content Studio 관리자(owner) 로그인 주장
+ *   - sub 없음 + isAdvertiserAccount=true  → Content Studio 광고주 계정 로그인 주장
+ *   - sub 있음                              → Universe에서 발급(직원 또는 Universe owner)
+ * 어느 경우든 클레임을 그대로 믿지 않고 DB로 재확인합니다.
+ *
+ * 반환값: { type:'owner'|'staff'|'advertiser', advertiserIds: string[]|null(=전체 허용),
+ *           permissionKeys: string[]|null(=전체 허용), tier: number, email, name }
+ * 유효하지 않으면 null(호출부는 401로 응답해야 함).
+ */
+async function resolveAuthContext(req) {
+  const payload = requireAuth(req);
+  if (!payload) return null;
+
+  // Case 1) sub가 없는 토큰 - Content Studio 자신이 발급했다고 주장하는 형태
+  if (payload.sub === undefined || payload.sub === null) {
+    if (payload.isAdvertiserAccount) {
+      // 광고주 계정 주장 - email+advertiserId 조합이 지금도 실제로 유효하고 활성 상태인지
+      // DB로 재확인합니다. 토큰의 advertiserId를 그대로 믿지 않고, 그 이메일 계정이
+      // 지금 실제로 그 광고주에 배정되어 있는지까지 함께 확인합니다.
+      if (!payload.email || !payload.advertiserId || !pgPool) return null;
+      const acctRes = await pgPool.query(
+        `SELECT u.status FROM app_users u JOIN app_memberships m ON m.user_id = u.id
+         WHERE u.email = $1 AND u.is_advertiser_account = true AND u.status = 'active' AND $2 = ANY(m.advertiser_ids)`,
+        [String(payload.email).toLowerCase(), payload.advertiserId]
+      );
+      if (!acctRes.rows[0]) return null;
+      const sub = await pgPool.query('SELECT plan_name FROM advertiser_subscriptions WHERE advertiser_id = $1', [payload.advertiserId]);
+      const tier = portalTierFromPlanName(sub.rows[0]?.plan_name || '');
+      return { type: 'advertiser', email: payload.email, name: payload.name, advertiserIds: [payload.advertiserId], permissionKeys: [], tier };
+    }
+    // owner(관리자) 주장 - 지금 설정된 ADMIN_EMAIL과 정확히 일치할 때만 인정합니다.
+    // 환경변수를 바꾸면(관리자 교체) 예전 토큰은 여기서 자동으로 무효화됩니다.
+    if (ADMIN_EMAIL && payload.email && String(payload.email).toLowerCase() === ADMIN_EMAIL.toLowerCase() && payload.name === ADMIN_NAME) {
+      return { type: 'owner', email: payload.email, name: payload.name, advertiserIds: null, permissionKeys: null, tier: 3 };
+    }
+    return null;
+  }
+
+  // Case 2) sub가 있는 토큰 - Universe에서 발급됨(직원 또는 Universe owner)
+  if (!pgPool) return null;
+  const result = await pgPool.query(
+    `SELECT u.id, u.status, u.is_advertiser_account, m.role_ids, m.advertiser_ids
+     FROM app_users u LEFT JOIN app_memberships m ON m.user_id = u.id WHERE u.id::text = $1`,
+    [String(payload.sub)]
+  );
+  const row = result.rows[0];
+  if (!row) {
+    // app_users 테이블에 없는 sub(예: Universe owner의 고정 id=1) - 이메일이 지금
+    // 설정된 ADMIN_EMAIL과 일치할 때만 owner로 인정합니다. 그 외에는 거부합니다 -
+    // "찾을 수 없으니 통과"가 아니라 "찾을 수 없으니 거부"가 기본값이어야 합니다.
+    if (ADMIN_EMAIL && payload.email && String(payload.email).toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+      return { type: 'owner', email: payload.email, advertiserIds: null, permissionKeys: null, tier: 3 };
+    }
+    return null;
+  }
+  if (row.status !== 'active') return null;
+  if (row.is_advertiser_account) {
+    // DB상으로는 광고주 계정인데 isAdvertiserAccount 클레임이 없는 토큰(구형 토큰이거나
+    // 클레임이 위조된 토큰) - 신뢰하지 않고 거부합니다. 재로그인을 요구해야 합니다.
+    return null;
+  }
+  let permissionKeys = [];
+  if (row.role_ids?.length) {
+    const roles = await pgPool.query('SELECT permission_keys FROM app_roles WHERE id = ANY($1::uuid[])', [row.role_ids]);
+    permissionKeys = [...new Set(roles.rows.flatMap(r => r.permission_keys || []))];
+  }
+  // advertiser_ids가 null이면 "전체 광고주 담당"(기존 팀원 권한 분리 정책과 동일하게 해석),
+  // 배열이면 그 배열 안의 광고주만 담당 - Universe의 팀원 범위 정책을 그대로 존중합니다.
+  return { type: 'staff', email: payload.email, advertiserIds: row.advertiser_ids || null, permissionKeys, tier: 3 };
+}
+
+/** ctx.advertiserIds가 null이면 전체 허용, 배열이면 그 안에 포함될 때만 허용합니다. */
+function ctxCanAccessAdvertiser(ctx, advertiserId) {
+  if (!ctx || !advertiserId) return false;
+  if (ctx.advertiserIds === null) return true;
+  return ctx.advertiserIds.includes(advertiserId);
 }
 function requireDb(res) {
   if (!pgPool) {
@@ -1050,19 +1234,21 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/api/')) {
-      const payload = requireAuth(req);
+      // P0 보안 수정: 서명만 확인하던 requireAuth() 대신, 매 요청마다 DB에서 실제
+      // 계정 상태·멤버십·구독 등급을 재확인하는 resolveAuthContext()를 씁니다.
+      // Universe에서 발급된 토큰(sub 있음)이 그대로 여기로 들어와도, 이제는 "클레임에
+      // isAdvertiserAccount가 없으니 무제한 통과"가 아니라 실제 DB 조회 결과로 범위가
+      // 결정됩니다. 변수명 payload는 하위 코드와의 호환을 위해 유지합니다.
+      const payload = await resolveAuthContext(req);
       if (!payload) return sendJson(res, 401, { error: '인증이 필요합니다.' });
-      // 광고주 계정이면 매 요청마다 최신 구독 등급을 다시 확인합니다(관리자가 등급을
-      // 바꿔도 재로그인 없이 반영). CONTENT PRO(3) 미달이면 콘텐츠 제작소 접근 자체를
-      // 차단합니다 - Universe 사이드바에 링크가 안 보이는 것과 별개로, 서버 쪽에서도
-      // 직접 URL로 들어오는 것까지 막아야 합니다.
-      if (payload.isAdvertiserAccount) {
-        if (!payload.advertiserId) return sendJson(res, 403, { error: '이 계정에 연결된 광고주가 없습니다.' });
-        const sub = pgPool ? await pgPool.query('SELECT plan_name FROM advertiser_subscriptions WHERE advertiser_id = $1', [payload.advertiserId]) : { rows: [] };
-        const tier = portalTierFromPlanName(sub.rows[0]?.plan_name || '');
-        if (tier < 3) return sendJson(res, 403, { error: `콘텐츠 제작소는 CONTENT PRO 구독에서 이용할 수 있습니다. (현재 등급 미달)` });
-        payload.advertiserScopeId = payload.advertiserId; // 이후 모든 조회를 이 값으로만 제한합니다.
+      if (payload.type === 'advertiser' && payload.tier < 3) {
+        return sendJson(res, 403, { error: `콘텐츠 제작소는 CONTENT PRO 구독에서 이용할 수 있습니다. (현재 등급 미달)` });
       }
+      // advertiserScopeId(단일값)는 광고주 계정처럼 "정확히 광고주 1곳만" 허용된 경우를
+      // 위한 하위 호환용 파생값입니다. 여러 광고주를 담당하는 직원이나 무제한 owner는
+      // 이 값이 없으므로, 실제 소유권 검사는 반드시 ctxCanAccessAdvertiser(payload, id)로
+      // 해야 합니다 - advertiserScopeId만 보고 "없으면 통과"로 판단하면 안 됩니다.
+      payload.advertiserScopeId = (payload.advertiserIds && payload.advertiserIds.length === 1) ? payload.advertiserIds[0] : undefined;
 
       if (req.method === 'GET' && pathname === '/api/advertisers') {
         if (!pgPool) return sendJson(res, 200, []);
@@ -1076,8 +1262,8 @@ const server = http.createServer(async (req, res) => {
                  COALESCE(to_jsonb(a)->>'address','') AS address,
                  to_jsonb(a)->>'business_reg_no' AS business_reg_no,
                  to_jsonb(a)->>'autopost_pro_industry' AS autopost_pro_industry
-          FROM advertisers a WHERE a.tenant_id=$1 ${payload.advertiserScopeId ? 'AND a.id::text=$2' : ''} ORDER BY a.name
-        `, payload.advertiserScopeId ? [tenantId, payload.advertiserScopeId] : [tenantId]);
+          FROM advertisers a WHERE a.tenant_id=$1 ${payload.advertiserIds !== null ? 'AND a.id::text=ANY($2::text[])' : ''} ORDER BY a.name
+        `, payload.advertiserIds !== null ? [tenantId, payload.advertiserIds] : [tenantId]);
         return sendJson(res, 200, result.rows);
       }
 
@@ -1087,7 +1273,9 @@ const server = http.createServer(async (req, res) => {
         if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
 
         if (req.method === 'GET' && pathname === '/api/ad/projects') {
-          const r = await pgPool.query(`SELECT id, data FROM ad_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          const r = payload.advertiserIds !== null
+            ? await pgPool.query(`SELECT id, data FROM ad_projects WHERE tenant_id=$1 AND advertiser_id::text = ANY($2::text[]) ORDER BY updated_at DESC`, [tenantId, payload.advertiserIds])
+            : await pgPool.query(`SELECT id, data FROM ad_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
           return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
         }
         if (req.method === 'POST' && pathname === '/api/ad/projects') {
@@ -1095,6 +1283,7 @@ const server = http.createServer(async (req, res) => {
           let row = normalizeAdProject(body);
           row.projectId = makeId('ad');
           if (!row.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          if (!ctxCanAccessAdvertiser(payload, row.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
           row.advertiserName = advRes.rows[0].name;
@@ -1105,6 +1294,14 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && pathname === '/api/ad/generate') {
           if (!aiInsightsConfigured()) return sendJson(res, 400, { error: `AI 광고 제작이 아직 연결되지 않았습니다(${AI_INSIGHTS_PROVIDER === 'openai' ? 'AI_INSIGHTS_API_KEY' : 'ANTHROPIC_API_KEY'} 미설정).`, configured: false });
           const body = await readJson(req);
+          const advertiserId = cleanText(body.advertiserId || '', 120);
+          if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          const idempotencyKey = cleanText(body.idempotencyKey || '', 120) || undefined;
+          const reservation = await reserveUsage(tenantId, advertiserId, 'ad-creation', 'generate', idempotencyKey);
+          if (!reservation.reserved) {
+            return sendJson(res, 403, { error: reservation.check?.reason || '이번 달 광고 제작 생성 한도를 초과했습니다.', usage: reservation.check });
+          }
           const brief = {
             advertiserName: cleanText(body.advertiserName || '', 120), channel: cleanText(body.channel || '', 60), objective: cleanText(body.objective || '', 60),
             target: cleanText(body.target || '', 200), keyBenefit: cleanText(body.keyBenefit || '', 300), hookType: cleanText(body.hookType || '', 60),
@@ -1119,8 +1316,14 @@ const server = http.createServer(async (req, res) => {
           const userPrompt = `아래 브리프로 광고 후킹 문구와 카피 시안을 작성하세요.\n${JSON.stringify(brief)}`;
           try {
             const parsed = await callContentAiJson(systemPrompt, userPrompt);
-            return sendJson(res, 200, { hooks: parsed.hooks || [], copyVariants: parsed.copyVariants || [] });
+            await confirmUsageReservation(reservation.event?.id);
+            return sendJson(res, 200, { hooks: parsed.hooks || [], copyVariants: parsed.copyVariants || [], usageEventId: reservation.event?.id });
           } catch (err) {
+            // 확실한 실패(AI 응답 파싱 실패, API 에러 등) - 예약을 반환합니다. 타임아웃처럼
+            // 외부에서 실제로 생성됐는지 불명확한 경우는 여기 없습니다(이 API는 결과를
+            // 동기적으로 그대로 반환하는 구조라 "성공 응답 없이 끝남 = 실제로 실패"로
+            // 간주해도 안전합니다 - 블로그처럼 별도 provider에 잔여 상태가 남는 구조가 아닙니다).
+            await refundUsageReservation(reservation.event?.id);
             return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 광고 제작에 실패했습니다.' });
           }
         }
@@ -1128,17 +1331,22 @@ const server = http.createServer(async (req, res) => {
         const adProjectMatch = pathname.match(/^\/api\/ad\/projects\/([^/]+)$/);
         if (adProjectMatch && req.method === 'GET') {
           const id = decodeURIComponent(adProjectMatch[1]);
-          const r = await pgPool.query(`SELECT id, data FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
-          return r.rows[0] ? sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id }) : sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
+          const r = await pgPool.query(`SELECT id, advertiser_id, data FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!r.rows[0]) return sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, r.rows[0].advertiser_id)) return sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
+          return sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id });
         }
         if (adProjectMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
           const id = decodeURIComponent(adProjectMatch[1]);
           const patch = await readJson(req);
-          const cur = await pgPool.query(`SELECT data FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, data FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           const current = cur.rows[0]?.data;
           if (!current) return sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
           const updated = normalizeAdProject(patch, { ...current, projectId:id });
           if (!updated.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          // advertiserId를 바꿔서 범위 밖 광고주로 옮기는 시도를 차단합니다.
+          if (!ctxCanAccessAdvertiser(payload, updated.advertiserId)) return sendJson(res, 403, { error: '이 광고주로 이동할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, updated.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
           updated.advertiserName = advRes.rows[0].name;
@@ -1147,6 +1355,9 @@ const server = http.createServer(async (req, res) => {
         }
         if (adProjectMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(adProjectMatch[1]);
+          const cur = await pgPool.query(`SELECT advertiser_id FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]) return sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '광고 제작 프로젝트를 찾을 수 없습니다.' });
           await pgPool.query(`DELETE FROM ad_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -1226,7 +1437,9 @@ const server = http.createServer(async (req, res) => {
         if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
 
         if (req.method === 'GET' && pathname === '/api/documents') {
-          const r = await pgPool.query(`SELECT id, data FROM document_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          const r = payload.advertiserIds !== null
+            ? await pgPool.query(`SELECT id, data FROM document_projects WHERE tenant_id=$1 AND advertiser_id::text = ANY($2::text[]) ORDER BY updated_at DESC`, [tenantId, payload.advertiserIds])
+            : await pgPool.query(`SELECT id, data FROM document_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
           return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
         }
         if (req.method === 'POST' && pathname === '/api/documents') {
@@ -1234,6 +1447,7 @@ const server = http.createServer(async (req, res) => {
           const row = normalizeDocumentProject(body);
           row.projectId = makeId('doc');
           if (!row.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          if (!ctxCanAccessAdvertiser(payload, row.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
           row.advertiserName = advRes.rows[0].name;
@@ -1244,6 +1458,14 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && pathname === '/api/documents/generate') {
           if (!aiInsightsConfigured()) return sendJson(res, 400, { error: `AI 문서 생성이 아직 연결되지 않았습니다(${AI_INSIGHTS_PROVIDER === 'openai' ? 'AI_INSIGHTS_API_KEY' : 'ANTHROPIC_API_KEY'} 미설정).`, configured: false });
           const body = await readJson(req);
+          const advertiserId = cleanText(body.advertiserId || '', 120);
+          if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          const idempotencyKey = cleanText(body.idempotencyKey || '', 120) || undefined;
+          const reservation = await reserveUsage(tenantId, advertiserId, 'document', 'generate', idempotencyKey);
+          if (!reservation.reserved) {
+            return sendJson(res, 403, { error: reservation.check?.reason || '이번 달 문서 생성 한도를 초과했습니다.', usage: reservation.check });
+          }
           const brief = { advertiserName: cleanText(body.advertiserName || '', 120), documentType: cleanText(body.documentType || '기획서', 60), topic: cleanText(body.topic || '', 300) };
           const systemPrompt = [
             '당신은 마케팅 업무 문서 초안을 쓰는 보조 작성자입니다.',
@@ -1254,29 +1476,48 @@ const server = http.createServer(async (req, res) => {
           const userPrompt = `아래 정보로 "${brief.documentType}" 문서 초안을 작성하세요.\n${JSON.stringify(brief)}`;
           try {
             const parsed = await callContentAiJson(systemPrompt, userPrompt);
-            return sendJson(res, 200, { blocks: Array.isArray(parsed) ? parsed : [] });
+            await confirmUsageReservation(reservation.event?.id);
+            return sendJson(res, 200, { blocks: Array.isArray(parsed) ? parsed : [], usageEventId: reservation.event?.id });
           } catch (err) {
+            await refundUsageReservation(reservation.event?.id);
             return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 문서 생성에 실패했습니다.' });
           }
         }
         const docMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
         if (docMatch && req.method === 'GET') {
           const id = decodeURIComponent(docMatch[1]);
-          const r = await pgPool.query(`SELECT id, data FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
-          return r.rows[0] ? sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id }) : sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
+          const r = await pgPool.query(`SELECT id, advertiser_id, data FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!r.rows[0]) return sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, r.rows[0].advertiser_id)) return sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
+          return sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id });
         }
         if (docMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
           const id = decodeURIComponent(docMatch[1]);
           const patch = await readJson(req);
-          const cur = await pgPool.query(`SELECT data FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, data FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           const current = cur.rows[0]?.data;
           if (!current) return sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
           const updated = normalizeDocumentProject(patch, { ...current, projectId: id });
-          await pgPool.query(`UPDATE document_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
+          // advertiserId를 바꾸는 요청이면 새 광고주도 허용 범위 안인지 확인하고, DB 컬럼도
+          // 같이 갱신합니다 - 안 그러면 JSON의 advertiserId와 DB의 advertiser_id가 어긋나서
+          // 다음 조회 때 권한 판단이 잘못될 수 있습니다.
+          if (updated.advertiserId !== current.advertiserId) {
+            if (!ctxCanAccessAdvertiser(payload, updated.advertiserId)) return sendJson(res, 403, { error: '이 광고주로 이동할 권한이 없습니다.' });
+            const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, updated.advertiserId]);
+            if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+            updated.advertiserName = advRes.rows[0].name;
+            await pgPool.query(`UPDATE document_projects SET advertiser_id=$3, data=$4, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, advRes.rows[0].id, JSON.stringify(updated)]);
+          } else {
+            await pgPool.query(`UPDATE document_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
+          }
           return sendJson(res, 200, updated);
         }
         if (docMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(docMatch[1]);
+          const cur = await pgPool.query(`SELECT advertiser_id FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]) return sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '문서를 찾을 수 없습니다.' });
           await pgPool.query(`DELETE FROM document_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -1288,7 +1529,9 @@ const server = http.createServer(async (req, res) => {
         if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
 
         if (req.method === 'GET' && pathname === '/api/video-scripts') {
-          const r = await pgPool.query(`SELECT id, data FROM video_script_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          const r = payload.advertiserIds !== null
+            ? await pgPool.query(`SELECT id, data FROM video_script_projects WHERE tenant_id=$1 AND advertiser_id::text = ANY($2::text[]) ORDER BY updated_at DESC`, [tenantId, payload.advertiserIds])
+            : await pgPool.query(`SELECT id, data FROM video_script_projects WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
           return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
         }
         if (req.method === 'POST' && pathname === '/api/video-scripts') {
@@ -1296,6 +1539,7 @@ const server = http.createServer(async (req, res) => {
           const row = normalizeVideoScriptProject(body);
           row.projectId = makeId('vs');
           if (!row.advertiserId) return sendJson(res, 400, { error: '광고주를 선택하세요.' });
+          if (!ctxCanAccessAdvertiser(payload, row.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
           row.advertiserName = advRes.rows[0].name;
@@ -1306,6 +1550,14 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && pathname === '/api/video-scripts/generate') {
           if (!aiInsightsConfigured()) return sendJson(res, 400, { error: `AI 영상 대본 생성이 아직 연결되지 않았습니다(${AI_INSIGHTS_PROVIDER === 'openai' ? 'AI_INSIGHTS_API_KEY' : 'ANTHROPIC_API_KEY'} 미설정).`, configured: false });
           const body = await readJson(req);
+          const advertiserId = cleanText(body.advertiserId || '', 120);
+          if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          const idempotencyKey = cleanText(body.idempotencyKey || '', 120) || undefined;
+          const reservation = await reserveUsage(tenantId, advertiserId, 'video-script', 'generate', idempotencyKey);
+          if (!reservation.reserved) {
+            return sendJson(res, 403, { error: reservation.check?.reason || '이번 달 영상 대본 생성 한도를 초과했습니다.', usage: reservation.check });
+          }
           const brief = {
             advertiserName: cleanText(body.advertiserName || '', 120), videoType: cleanText(body.videoType || '', 60), targetSeconds: Number(body.targetSeconds) || 30,
             keyMessage: cleanText(body.keyMessage || '', 300), cta: cleanText(body.cta || '', 60),
@@ -1320,29 +1572,45 @@ const server = http.createServer(async (req, res) => {
           const userPrompt = `아래 브리프로 영상 대본 장면을 작성하세요.\n${JSON.stringify(brief)}`;
           try {
             const parsed = await callContentAiJson(systemPrompt, userPrompt);
-            return sendJson(res, 200, { scenes: Array.isArray(parsed) ? parsed : [] });
+            await confirmUsageReservation(reservation.event?.id);
+            return sendJson(res, 200, { scenes: Array.isArray(parsed) ? parsed : [], usageEventId: reservation.event?.id });
           } catch (err) {
+            await refundUsageReservation(reservation.event?.id);
             return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 영상 대본 생성에 실패했습니다.' });
           }
         }
         const vsMatch = pathname.match(/^\/api\/video-scripts\/([^/]+)$/);
         if (vsMatch && req.method === 'GET') {
           const id = decodeURIComponent(vsMatch[1]);
-          const r = await pgPool.query(`SELECT id, data FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
-          return r.rows[0] ? sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id }) : sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
+          const r = await pgPool.query(`SELECT id, advertiser_id, data FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!r.rows[0]) return sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, r.rows[0].advertiser_id)) return sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
+          return sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id });
         }
         if (vsMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
           const id = decodeURIComponent(vsMatch[1]);
           const patch = await readJson(req);
-          const cur = await pgPool.query(`SELECT data FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, data FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           const current = cur.rows[0]?.data;
           if (!current) return sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
           const updated = normalizeVideoScriptProject(patch, { ...current, projectId: id });
-          await pgPool.query(`UPDATE video_script_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
+          if (updated.advertiserId !== current.advertiserId) {
+            if (!ctxCanAccessAdvertiser(payload, updated.advertiserId)) return sendJson(res, 403, { error: '이 광고주로 이동할 권한이 없습니다.' });
+            const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, updated.advertiserId]);
+            if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+            updated.advertiserName = advRes.rows[0].name;
+            await pgPool.query(`UPDATE video_script_projects SET advertiser_id=$3, data=$4, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, advRes.rows[0].id, JSON.stringify(updated)]);
+          } else {
+            await pgPool.query(`UPDATE video_script_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
+          }
           return sendJson(res, 200, updated);
         }
         if (vsMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(vsMatch[1]);
+          const cur = await pgPool.query(`SELECT advertiser_id FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]) return sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '영상 대본을 찾을 수 없습니다.' });
           await pgPool.query(`DELETE FROM video_script_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -1602,16 +1870,17 @@ const server = http.createServer(async (req, res) => {
         if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
 
         if (req.method === 'GET' && pathname === '/api/blog/projects') {
-          const r = await pgPool.query(
-            `SELECT id, data FROM blog_projects WHERE tenant_id=$1 ${payload.advertiserScopeId ? `AND data->>'advertiserId'=$2` : ''} ORDER BY created_at DESC`,
-            payload.advertiserScopeId ? [tenantId, payload.advertiserScopeId] : [tenantId]
-          );
+          const r = payload.advertiserIds !== null
+            ? await pgPool.query(`SELECT id, data FROM blog_projects WHERE tenant_id=$1 AND advertiser_id::text = ANY($2::text[]) ORDER BY created_at DESC`, [tenantId, payload.advertiserIds])
+            : await pgPool.query(`SELECT id, data FROM blog_projects WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]);
           return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), projectId: row.id })));
         }
         if (req.method === 'POST' && pathname === '/api/blog/projects') {
           const body = await readJson(req); const stamp = new Date().toISOString();
           // 광고주 계정은 body.advertiserId를 신뢰하지 않고 항상 본인 광고주로 고정합니다.
+          // 여러 광고주를 담당하는 직원은 body.advertiserId가 실제로 담당 범위 안인지 검사합니다.
           const forcedAdvertiserId = payload.advertiserScopeId || cleanText(body.advertiserId, 120);
+          if (!ctxCanAccessAdvertiser(payload, forcedAdvertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const row = {
             projectId: makeId('blog'), advertiserId: forcedAdvertiserId, advertiserName: cleanText(body.advertiserName, 120),
             industry: cleanText(body.industry || '일반 서비스업', 120), platform: cleanText(body.platform || '네이버 블로그', 120), contentType: cleanText(body.contentType || '정보형 블로그', 120),
@@ -1631,29 +1900,38 @@ const server = http.createServer(async (req, res) => {
         const projectMatch = pathname.match(/^\/api\/blog\/projects\/([^/]+)$/);
         if (projectMatch && req.method === 'GET') {
           const id = decodeURIComponent(projectMatch[1]);
-          const r = await pgPool.query(`SELECT id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const r = await pgPool.query(`SELECT id, advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!r.rows[0]) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
-          if (payload.advertiserScopeId && r.rows[0].data?.advertiserId !== payload.advertiserScopeId) return sendJson(res, 403, { error: '이 프로젝트에 접근할 권한이 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, r.rows[0].advertiser_id)) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           return sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id });
         }
         if (projectMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
           const id = decodeURIComponent(projectMatch[1]); const patch = await readJson(req);
-          const cur = await pgPool.query(`SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           const current = cur.rows[0]?.data;
           if (!current) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
-          if (payload.advertiserScopeId && current.advertiserId !== payload.advertiserScopeId) return sendJson(res, 403, { error: '이 프로젝트에 접근할 권한이 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           if (current.medicalReview?.locked && (patch.blocks || patch.selectedTitle) && !patch.unlockForRevision) return sendJson(res, 409, { error: '심의 완료 문안이 잠겨 있습니다. 재검토로 전환한 뒤 수정하세요.' });
-          const safePatch = { ...patch }; delete safePatch.projectId; delete safePatch.createdAt; delete safePatch.unlockForRevision; delete safePatch.advertiserId;
+          // advertiserId는 PATCH로 절대 바꿀 수 없습니다(다른 광고주로 이동하는 우회 차단).
+          // autopostCompliance는 클라이언트가 임의로 "통과"를 써서 보낼 수 있는 필드라, 일반
+          // PATCH로는 절대 바꿀 수 없게 막습니다 - 오직 /api/blog/compliance(서버가 직접
+          // 오토포스트 Pro를 호출해 받은 결과)만 이 필드를 갱신할 수 있습니다.
+          const safePatch = { ...patch }; delete safePatch.projectId; delete safePatch.createdAt; delete safePatch.unlockForRevision; delete safePatch.advertiserId; delete safePatch.autopostCompliance;
           const updated = { ...current, ...safePatch, projectId: id, updatedAt: new Date().toISOString() };
+          // 검수의 실제 입력(본문·제목)이 바뀌면 과거 검수 결과는 더 이상 "지금 이 문서"에
+          // 대한 결과가 아니므로 자동으로 무효화합니다 - 재생성뿐 아니라 수동 편집으로
+          // 본문을 고친 경우도 포함합니다.
+          const contentChanged = (safePatch.blocks !== undefined && JSON.stringify(safePatch.blocks) !== JSON.stringify(current.blocks))
+            || (safePatch.selectedTitle !== undefined && safePatch.selectedTitle !== current.selectedTitle);
+          if (contentChanged) updated.autopostCompliance = null;
           await pgPool.query(`UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, JSON.stringify(updated)]);
           return sendJson(res, 200, updated);
         }
         if (projectMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(projectMatch[1]);
-          if (payload.advertiserScopeId) {
-            const cur = await pgPool.query(`SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
-            if (cur.rows[0] && cur.rows[0].data?.advertiserId !== payload.advertiserScopeId) return sendJson(res, 403, { error: '이 프로젝트에 접근할 권한이 없습니다.' });
-          }
+          const cur = await pgPool.query(`SELECT advertiser_id FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           await pgPool.query(`DELETE FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -1684,7 +1962,7 @@ const server = http.createServer(async (req, res) => {
           const q = new URL(req.url, 'http://x').searchParams;
           const advertiserId = q.get('advertiserId');
           if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
-          if (payload.advertiserScopeId && advertiserId !== payload.advertiserScopeId) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const cached = await findAutopostProSeat(advertiserId);
           if (!cached) return sendJson(res, 404, { error: '아직 좌석이 없습니다. 먼저 초안을 생성하거나 좌석을 만드세요.', noSeat: true });
           try {
@@ -1700,7 +1978,7 @@ const server = http.createServer(async (req, res) => {
           const body = await readJson(req);
           const advertiserId = cleanText(body.advertiserId || '', 120);
           if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
-          if (payload.advertiserScopeId && advertiserId !== payload.advertiserScopeId) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const advRes = await pgPool.query('SELECT id, name, industry, business_reg_no, autopost_pro_industry FROM advertisers WHERE tenant_id=$1 AND id::text=$2', [tenantId, advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 404, { error: '광고주를 찾을 수 없습니다.' });
           try {
@@ -1711,9 +1989,11 @@ const server = http.createServer(async (req, res) => {
           }
         }
         // ── 아래 3개는 여러 광고주를 관리하는 내부 직원 전용 기능입니다.
-        // 광고주 계정은 본인 좌석 하나만 조회/생성할 수 있고, 정지·재개·전체목록·
-        // 전체사용량 같은 관리 기능에는 아예 접근할 수 없습니다. ──
-        if (payload.advertiserScopeId && (
+        // 광고주 계정(type==='advertiser')은 본인 좌석 하나만 조회/생성할 수 있고, 정지·재개·
+        // 전체목록·전체사용량 같은 관리 기능에는 아예 접근할 수 없습니다 - 담당 광고주가
+        // 1곳뿐인 "직원"과 혼동하면 안 되므로 advertiserScopeId(파생값)가 아니라 실제
+        // 계정 종류(payload.type)로 판단합니다.
+        if (payload.type === 'advertiser' && (
           (req.method === 'POST' && (pathname === '/api/blog/autopost-pro/seat/suspend' || pathname === '/api/blog/autopost-pro/seat/activate')) ||
           (req.method === 'GET' && (pathname === '/api/blog/autopost-pro/seats' || pathname === '/api/blog/autopost-pro/usage'))
         )) {
@@ -1763,14 +2043,42 @@ const server = http.createServer(async (req, res) => {
           const industry = cleanText(body.industry || '', 40);
           const text = cleanText(body.text || '', 20000);
           const orgName = cleanText(body.orgName || body.org_name || '', 200);
+          const projectId = cleanText(body.projectId || '', 120);
           if (!industry || !text) return sendJson(res, 400, { error: 'industry와 text가 필요합니다.' });
+          // 검수 시작 시점의 본문 버전을 기록해둡니다 - 검수는 외부 API 호출이라 시간이
+          // 걸리는데, 그 사이에 본문이 바뀌면 도착한 결과가 "이미 지나간 버전"의 결과가
+          // 됩니다. 그런 결과를 새 본문에 잘못 적용하지 않기 위해 해시로 비교합니다.
+          let project = null; let contentHashAtStart = null;
+          if (projectId) {
+            const projRes = await pgPool.query('SELECT advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+            if (!projRes.rows.length) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
+            if (!ctxCanAccessAdvertiser(payload, projRes.rows[0].advertiser_id)) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
+            project = projRes.rows[0].data;
+            contentHashAtStart = crypto.createHash('sha256').update(JSON.stringify({ blocks: project.blocks, selectedTitle: project.selectedTitle })).digest('hex');
+          }
           try {
             const result = await autopostProRequest('POST', '/v1/compliance', { industry, text, org_name: orgName });
+            // 검수 이력은 항상 남깁니다(과거 기록 보존 - 지금 유효한 승인인지와는 별개입니다).
             await pgPool.query(
               `INSERT INTO blog_compliance_checks (tenant_id, project_id, passed, issues) VALUES ($1,$2,$3,$4)`,
-              [tenantId, cleanText(body.projectId || '', 120) || null, Boolean(result.passed), JSON.stringify(result.issues || [])]
+              [tenantId, projectId || null, Boolean(result.passed), JSON.stringify(result.issues || [])]
             );
-            return sendJson(res, 200, result);
+            if (projectId) {
+              // 결과가 도착한 지금, 본문이 검수 시작 시점과 같은지 다시 확인합니다.
+              const nowRes = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+              if (!nowRes.rows.length) return sendJson(res, 200, { ...result, applied: false, reason: 'project_deleted' });
+              const nowData = nowRes.rows[0].data;
+              const contentHashNow = crypto.createHash('sha256').update(JSON.stringify({ blocks: nowData.blocks, selectedTitle: nowData.selectedTitle })).digest('hex');
+              if (contentHashNow !== contentHashAtStart) {
+                // 검수 도중 본문이 바뀌었습니다 - 이 결과는 이전 본문에 대한 것이므로 지금
+                // 문서에는 적용하지 않고 폐기합니다(이력에는 이미 남겼습니다).
+                return sendJson(res, 200, { ...result, applied: false, reason: 'content_changed_during_check' });
+              }
+              const stamp = new Date().toISOString();
+              const updatedProject = { ...nowData, autopostCompliance: { ...result, contentHash: contentHashNow, checkedAt: stamp }, updatedAt: stamp };
+              await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updatedProject)]);
+            }
+            return sendJson(res, 200, { ...result, applied: Boolean(projectId) });
           } catch (error) {
             return sendJson(res, error?.status || 502, { error: error?.message || '규정검수에 실패했습니다.' });
           }
@@ -1786,78 +2094,115 @@ const server = http.createServer(async (req, res) => {
           const projectId = cleanText(body.projectId || '', 120);
           if (!projectId) return sendJson(res, 400, { error: 'projectId가 필요합니다.' });
 
-          // 외부(과금 가능) API를 부르기 전에 반드시 먼저 확인합니다: 이 프로젝트가
-          // 실제로 존재하는가? 존재하지 않으면 여기서 즉시 404로 끝내고, 오토포스트 Pro는
-          // 아예 호출하지 않습니다 - 잘못된 projectId로 과금만 발생하고 저장은 안 되는
-          // 상황을 원천적으로 막습니다.
-          const projectRow = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+          const projectRow = await pgPool.query('SELECT advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
           if (!projectRow.rows.length) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
-          // advertiserId는 클라이언트가 보낸 값을 신뢰하지 않고, 이 프로젝트에 실제로
-          // 연결된 광고주로 항상 덮어씁니다 - 클라이언트 값과 프로젝트 소속 광고주가
-          // 달라도(또는 조작되어도) 항상 프로젝트의 진짜 광고주 기준으로만 과금·좌석이 결정됩니다.
+          if (!ctxCanAccessAdvertiser(payload, projectRow.rows[0].advertiser_id)) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
           const verifiedAdvertiserId = cleanText(projectRow.rows[0].data?.advertiserId || '', 120);
-          if (payload.advertiserScopeId && verifiedAdvertiserId !== payload.advertiserScopeId) return sendJson(res, 403, { error: '이 프로젝트에 접근할 권한이 없습니다.' });
 
-          // 이미 같은 키로 완전히 끝난 시도가 있으면 그 결과를 그대로 재사용합니다(재클릭·재요청 방지).
-          const existing = await pgPool.query('SELECT * FROM blog_generation_requests WHERE idempotency_key=$1', [idempotencyKey]);
+          const brief = {
+            advertiserId: verifiedAdvertiserId,
+            industry: cleanText(body.industry || '업종 무관', 60), platform: cleanText(body.platform || '블로그', 60),
+            primaryKeyword: keyword,
+            secondaryKeywords: Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords : [],
+            region: cleanText(body.region || '', 60), targetLength: Number(body.targetLength) || undefined, tone: cleanText(body.tone || '자연스러운 정보 전달형', 60),
+            length: cleanText(body.length || '', 20), numImages: body.numImages, confirmOverage: Boolean(body.confirmOverage),
+            idempotencyKey,
+          };
+          // confirmOverage는 지문에서 제외합니다 - "초과 과금에 동의하고 같은 시도를 재개"는
+          // 생성 내용을 바꾸는 게 아니라 진행 여부에 대한 사용자 결정이기 때문입니다.
+          const fingerprintInput = { ...brief }; delete fingerprintInput.confirmOverage; delete fingerprintInput.idempotencyKey;
+          const briefFingerprint = crypto.createHash('sha256').update(JSON.stringify(fingerprintInput)).digest('hex');
+
+          const existing = await pgPool.query('SELECT * FROM blog_generation_requests WHERE tenant_id=$1 AND idempotency_key=$2', [tenantId, idempotencyKey]);
           const reqRow = existing.rows[0];
+
+          if (reqRow) {
+            // 같은 키인데 다른 프로젝트 소속이면 절대 재사용하지 않습니다 - 결과가 다른
+            // 프로젝트로 섞여 들어가는 사고를 막습니다.
+            if (reqRow.project_id !== projectId) {
+              return sendJson(res, 409, { error: '이 idempotency 키는 이미 다른 프로젝트의 생성 시도에 사용되었습니다. 새로고침 후 다시 시도해주세요.', code: 'idempotency_project_mismatch' });
+            }
+            // 같은 키인데 브리프(키워드·업종 등 생성 내용)가 바뀌었으면 재사용하지 않고 거절합니다.
+            if (reqRow.brief_fingerprint && reqRow.brief_fingerprint !== briefFingerprint) {
+              return sendJson(res, 409, { error: '이 요청은 이전과 다른 내용으로 변경되었습니다. 새로고침 후 다시 시도해주세요.', code: 'idempotency_brief_mismatch' });
+            }
+          }
           if (reqRow?.status === 'completed') {
             return sendJson(res, 200, { ...reqRow.result, billing: reqRow.billing, idempotencyKey, replayed: true });
           }
 
+          // "처리 중(processing)" 상태가 5분 넘게 갱신이 없으면 죽은 프로세스가 남긴 것으로
+          // 보고 복구 대상으로 취급합니다(영구 잠금 방지) - 그 전까지는 동시 실행을 막습니다.
+          const PROCESSING_STALE_MS = 5 * 60 * 1000;
+          const isStaleProcessing = reqRow?.status === 'processing' && (Date.now() - new Date(reqRow.updated_at).getTime() > PROCESSING_STALE_MS);
+          if (reqRow?.status === 'processing' && !isStaleProcessing) {
+            return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
+          }
+
           let genResult;
           if (reqRow?.status === 'ai_completed') {
-            // AI 호출은 이미 성공(=이미 과금됐을 수 있음)했는데 저장에서 멈춘 경우 - AI를
-            // 다시 부르지 않고, 캐시해둔 결과로 저장만 다시 시도합니다. 이 fix 배포 전에
-            // 이미 저장된(정제 안 된) 캐시일 수도 있으니 여기서도 한 번 더 정제합니다.
             genResult = sanitizeDeep({ ...reqRow.result, billing: reqRow.billing });
           } else {
+            // 외부 호출 전에 먼저 "처리 중" 상태를 원자적으로 등록합니다(UNIQUE 제약이
+            // 동시 등록을 막아줍니다) - 같은 키로 동시에 두 요청이 들어와도 AI가 두 번
+            // 호출되지 않습니다.
             try {
-              const brief = {
-                advertiserId: verifiedAdvertiserId,
-                industry: cleanText(body.industry || '업종 무관', 60), platform: cleanText(body.platform || '블로그', 60),
-                primaryKeyword: keyword,
-                // 서브 키워드·지역·톤앤매너·참고자료는 오토포스트 Pro API 규격에 없는 필드라
-                // 실제 생성 요청에는 반영되지 않습니다 - HOWTOM 내부 참고용으로만 저장됩니다.
-                secondaryKeywords: Array.isArray(body.secondaryKeywords) ? body.secondaryKeywords : [],
-                region: cleanText(body.region || '', 60), targetLength: Number(body.targetLength) || undefined, tone: cleanText(body.tone || '자연스러운 정보 전달형', 60),
-                length: cleanText(body.length || '', 20), numImages: body.numImages, confirmOverage: Boolean(body.confirmOverage),
-                idempotencyKey,
-              };
-              genResult = sanitizeDeep(await callBlogGenerationProvider(brief));
               await pgPool.query(
-                `INSERT INTO blog_generation_requests (tenant_id, project_id, idempotency_key, provider_draft_id, status, billing, result)
-                 VALUES ($1,$2,$3,$4,'ai_completed',$5,$6)
-                 ON CONFLICT (idempotency_key) DO UPDATE SET status='ai_completed', billing=$5, result=$6, provider_draft_id=$4`,
-                [tenantId, projectId, idempotencyKey, genResult.providerDraftId || null, JSON.stringify(genResult.billing || null), JSON.stringify(genResult)]
+                `INSERT INTO blog_generation_requests (tenant_id, project_id, idempotency_key, status, brief_fingerprint, updated_at)
+                 VALUES ($1,$2,$3,'processing',$4,now())
+                 ON CONFLICT (idempotency_key) DO UPDATE SET status='processing', brief_fingerprint=$4, updated_at=now()
+                 WHERE blog_generation_requests.status IN ('requested','failed') OR (blog_generation_requests.status='processing' AND blog_generation_requests.updated_at < now() - interval '5 minutes')`,
+                [tenantId, projectId, idempotencyKey, briefFingerprint]
+              );
+              const verify = await pgPool.query('SELECT status FROM blog_generation_requests WHERE tenant_id=$1 AND idempotency_key=$2', [tenantId, idempotencyKey]);
+              if (verify.rows[0]?.status !== 'processing') {
+                // 방금 등록에 실패했다는 건 그사이 다른 동시 요청이 먼저 처리 중으로
+                // 등록했다는 뜻입니다 - 경쟁에서 진 요청은 여기서 물러납니다.
+                return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
+              }
+              const brief2 = { ...brief };
+              genResult = sanitizeDeep(await callBlogGenerationProvider(brief2));
+              await pgPool.query(
+                `UPDATE blog_generation_requests SET status='ai_completed', billing=$2, result=$3, provider_draft_id=$4, updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$5`,
+                [tenantId, JSON.stringify(genResult.billing || null), JSON.stringify(genResult), genResult.providerDraftId || null, idempotencyKey]
               );
             } catch (error) {
+              // 확실한 실패입니다(외부 공급사가 에러를 반환) - failed로 표시해 재시도를 허용합니다.
+              // 초과 과금 확인이 필요한 409는 "실패"가 아니라 "사용자 결정 대기"이므로 failed로
+              // 표시하지 않습니다 - 그래야 같은 키로 confirmOverage만 바꿔 재개할 수 있습니다.
+              if (error?.code !== 'overage_confirm_required') {
+                await pgPool.query(`UPDATE blog_generation_requests SET status='failed', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
+              }
               const status = error?.code === 'overage_confirm_required' ? 409 : (error?.status || 502);
               return sendJson(res, status, { error: error instanceof Error ? error.message : 'AI 원고 생성에 실패했습니다.', code: error?.code });
             }
           }
 
-          // 생성된 내용을 프로젝트에 저장합니다(위에서 이미 존재를 확인했으니 여기선 항상 있습니다).
-          // 이 저장이 실패해도 "생성 실패"가 아니라 "생성은 끝났고(이미 과금됐을 수 있음)
-          // 저장만 재시도가 필요"한 상태입니다.
+          // 생성된 내용을 프로젝트에 저장합니다. AI 호출은 이미 끝났으므로(과금됐을 수 있음),
+          // 이 시점부터는 반드시 ai_completed 상태와 결과를 보존해야 합니다 - 프로젝트가
+          // 그사이 삭제됐어도 "완료"로 잘못 표시하면 안 됩니다(재시도로 결과를 복구할 방법이
+          // 없어지기 때문입니다).
           try {
             const cur = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
-            if (cur.rows[0]) {
-              // genResult는 이미 위에서(callBlogGenerationProvider 직후, 첫 DB 저장 전에)
-              // sanitizeDeep으로 정제됐으므로 여기서 다시 필드별로 정제할 필요가 없습니다.
-              const updated = {
-                ...cur.rows[0].data,
-                titleOptions: genResult.titles || [], selectedTitle: genResult.titles?.[0] || '', blocks: genResult.blocks || [], status: 'writing',
-                billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: genResult.metaDescription || '',
-                updatedAt: new Date().toISOString(),
-              };
-              await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updated)]);
+            if (!cur.rows[0]) {
+              // 프로젝트가 결과 저장 직전에 삭제됐습니다 - completed로 표시하지 않고
+              // ai_completed 상태 그대로 둡니다(결과는 이미 result 컬럼에 보존되어 있음).
+              console.error('[블로그 생성] 저장 대상 프로젝트가 삭제됨:', { projectId, idempotencyKey });
+              return sendJson(res, 409, { error: '생성이 완료됐지만 프로젝트가 삭제되어 저장할 수 없습니다. 관리자에게 문의해주세요.', code: 'project_deleted', idempotencyKey });
             }
-            await pgPool.query(`UPDATE blog_generation_requests SET status='completed', completed_at=now() WHERE idempotency_key=$1`, [idempotencyKey]);
+            const updated = {
+              ...cur.rows[0].data,
+              titleOptions: genResult.titles || [], selectedTitle: genResult.titles?.[0] || '', blocks: genResult.blocks || [], status: 'writing',
+              // 재생성은 본문을 통째로 새로 만드는 것이므로, 과거 검수 결과는 무조건
+              // 무효화합니다 - 프론트가 이 필드를 뭘 보내든 서버가 직접 정합니다.
+              autopostCompliance: null,
+              billing: genResult.billing || null, providerDraftId: genResult.providerDraftId || null, tags: genResult.tags || [], metaDescription: genResult.metaDescription || '',
+              updatedAt: new Date().toISOString(),
+            };
+            await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updated)]);
+            await pgPool.query(`UPDATE blog_generation_requests SET status='completed', completed_at=now(), updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]);
             return sendJson(res, 200, { ...genResult, idempotencyKey });
           } catch (saveError) {
-            // 예전엔 이 에러가 콘솔에 전혀 안 남아서, 저장이 왜 계속 실패하는지 로그로도
-            // 알 방법이 없었습니다 - 반드시 남깁니다(Railway 배포 로그에서 확인 가능).
             console.error('[블로그 생성] 저장 실패:', { projectId, idempotencyKey, error: saveError?.message || saveError, stack: saveError?.stack });
             return sendJson(res, 200, {
               ...genResult, idempotencyKey,

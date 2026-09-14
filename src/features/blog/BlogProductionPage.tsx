@@ -227,11 +227,17 @@ export function BlogProductionPage(){
       const industryCode=advertiserAutopostCode;
       if(!industryCode){setNotice("이 업종은 오토포스트 Pro 규정검수를 지원하지 않습니다(병원·치과·한의원·동물병원·세무·학원만 가능).");return;}
       const plainText=stripHtml(project.blocks.map(b=>b.type==='html'?(b.text||''):`${b.title||''}\n${b.text||''}`).join('\n\n'));
+      // 결과 저장은 이제 서버가 직접 처리합니다(본문 버전 해시로 검수 도중 본문이 바뀌지
+      // 않았는지 확인한 뒤에만 반영) - 클라이언트가 PATCH로 결과를 직접 써넣을 수 없도록
+      // 막았기 때문에, 여기서 별도로 patch()를 호출하지 않습니다.
       const result=await blogApi.autopostCompliance({industry:industryCode,text:plainText,orgName:project.advertiserName,projectId:project.projectId});
-      setAutopostCompliance(result);
-      const saved=await patch({autopostCompliance:result});
-      const base=result.passed?'오토포스트 규정검수를 통과했습니다.':`오토포스트 규정검수에서 ${result.issues.length}건이 확인됐습니다.`;
-      setNotice(saved?base:`${base} (결과 저장에는 실패했습니다 - 새로고침하면 이 결과가 사라질 수 있습니다)`);
+      if(result.applied===false){
+        setAutopostCompliance(null);
+        setNotice(result.reason==='content_changed_during_check'?'검수 중 본문이 변경되어 이번 결과는 적용되지 않았습니다. 다시 검수해주세요.':'결과를 저장하지 못했습니다. 다시 시도해주세요.');
+      }else{
+        setAutopostCompliance(result);
+        setNotice(result.passed?'오토포스트 규정검수를 통과했습니다.':`오토포스트 규정검수에서 ${result.issues.length}건이 확인됐습니다.`);
+      }
     }catch(e){setNotice(e instanceof Error?e.message:'규정검수에 실패했습니다.');}
     finally{setComplianceChecking(false);}
   };
