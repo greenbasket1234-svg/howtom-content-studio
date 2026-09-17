@@ -355,7 +355,34 @@ export function BlogProductionPage(){
       </main>
 
       <aside className="blog26-side card">
-        <PhotoPanel assets={advertiserAssets} project={project} onAttach={attachAsset} onRegister={()=>setAssetOpen(true)} onDelete={async id=>{await blogApi.deleteAsset(id);setAssets(rows=>rows.filter(r=>r.assetId!==id));}} onInsertHtml={(url,name)=>{const htmlBlock=project.blocks.find(b=>b.type==='html');if(htmlBlock){updateBlock(htmlBlock.blockId,{text:(htmlBlock.text||'')+`\n<img src="${url}" alt="${name}" style="max-width:100%;height:auto;border-radius:8px;margin:8px 0;" />`});}}}/>
+        <PhotoPanel assets={advertiserAssets} project={project} onAttach={attachAsset} onRegister={()=>setAssetOpen(true)} onDelete={async id=>{await blogApi.deleteAsset(id);setAssets(rows=>rows.filter(r=>r.assetId!==id));}} onInsertHtml={(url,name,tags,caption)=>{
+          const htmlBlock=project.blocks.find(b=>b.type==='html');
+          if(!htmlBlock){setNotice('본문이 없습니다. 먼저 초안을 생성하세요.');return;}
+          const html=htmlBlock.text||'';
+          const imgTag=`\n<figure style="margin:16px 0;text-align:center;"><img src="${url}" alt="${name}" style="max-width:100%;height:auto;border-radius:8px;" /><figcaption style="font-size:12px;color:#6b7280;margin-top:6px;">${caption||name}</figcaption></figure>\n`;
+          // 1. [사진N] 자리표시자가 있으면 첫 번째 것을 교체합니다.
+          const placeholderRe=/\[사진\d+\]|\[photo\d+\]/i;
+          if(placeholderRe.test(html)){updateBlock(htmlBlock.blockId,{text:html.replace(placeholderRe,imgTag.trim())});setNotice(`📷 "${name}" — [사진] 자리에 삽입했습니다.`);return;}
+          // 2. tags + caption 키워드와 본문 문단을 매칭합니다.
+          const keywords=[...(tags||[]),...(caption||'').split(/[\s,]+/)].map(k=>k.trim()).filter(k=>k.length>=2);
+          let insertPos=-1;
+          for(const kw of keywords){
+            const idx=html.toLowerCase().indexOf(kw.toLowerCase());
+            if(idx<0)continue;
+            // 키워드가 속한 문단 또는 제목 태그의 닫힘 위치를 찾습니다.
+            const closeP=html.indexOf('</p>',idx);const closeH2=html.indexOf('</h2>',idx);const closeH3=html.indexOf('</h3>',idx);
+            const candidates=[closeP!==-1?closeP+4:-1,closeH2!==-1?closeH2+5:-1,closeH3!==-1?closeH3+5:-1].filter(p=>p>0);
+            if(candidates.length){insertPos=Math.min(...candidates);break;}
+          }
+          if(insertPos>-1){
+            updateBlock(htmlBlock.blockId,{text:html.slice(0,insertPos)+imgTag+html.slice(insertPos)});
+            setNotice(`📷 "${name}" — 관련 문단 뒤에 삽입했습니다.`);
+          }else{
+            // 3. 매칭 없으면 본문 끝에 추가합니다.
+            updateBlock(htmlBlock.blockId,{text:html+imgTag});
+            setNotice(`📷 "${name}" — 본문 끝에 삽입했습니다.`);
+          }
+        }}/>
       </aside>
 
     </div>
@@ -448,7 +475,7 @@ function CompliancePanel({project,issues,onPatch,onLock,onUnlock}:{project:BlogP
   const medical=isMedicalIndustry(project.industry);
   return <section className="blog26-side-section"><div className="blog26-compliance-summary"><ShieldCheck size={22}/><div><b>업종별 사전점검</b><span>{issues.filter(x=>x.severity==='danger').length}개 위험 · {issues.filter(x=>x.severity==='warning').length}개 주의 · {issues.filter(x=>x.severity==='info').length}개 확인</span></div></div><p className="blog26-muted">법률 자문이나 공식 심의를 대체하지 않는 내부 사전점검입니다.</p><div className="blog26-issue-list">{issues.map(issue=><button key={issue.id} className={`blog26-issue ${issue.severity}`} onClick={()=>issue.blockId&&document.getElementById(`blog-block-${issue.blockId}`)?.scrollIntoView({behavior:'smooth',block:'center'})}><span>{issue.category}</span><b>{issue.phrase}</b><small>{issue.reason}</small><em>{issue.suggestion}</em></button>)}{!issues.length&&<div className="blog26-clean"><Check size={18}/> 현재 규칙에서 감지된 위험 표현이 없습니다.</div>}</div>{medical&&<div className="blog26-medical-box"><h4>의료광고 심의 관리</h4><label>사전심의 대상 여부<select value={project.medicalReview.required===true?'yes':project.medicalReview.required===false?'no':'unknown'} onChange={e=>onPatch({medicalReview:{...project.medicalReview,required:e.target.value==='yes'?true:e.target.value==='no'?false:null,status:e.target.value==='no'?'not-required':'check-needed'}})}><option value="unknown">담당자 확인 필요</option><option value="yes">심의 대상 확인</option><option value="no">심의 불필요 확인</option></select></label><label>심의 상태<select value={project.medicalReview.status} onChange={e=>onPatch({medicalReview:{...project.medicalReview,status:e.target.value as BlogProject['medicalReview']['status']}})}>{Object.entries(REVIEW_LABEL).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label><label>심의필번호<input value={project.medicalReview.reviewNumber} onChange={e=>onPatch({medicalReview:{...project.medicalReview,reviewNumber:e.target.value}})} placeholder="심의 완료 후 입력"/></label><label>심의 완료일<input type="date" value={project.medicalReview.reviewedAt?.slice(0,10)||''} onChange={e=>onPatch({medicalReview:{...project.medicalReview,reviewedAt:e.target.value}})}/></label>{project.medicalReview.locked?<button className="btn secondary wide" onClick={()=>void onUnlock()}><Unlock size={14}/> 문안 잠금 해제·재검토</button>:<button className="btn primary wide" disabled={project.medicalReview.status!=='approved'||!project.medicalReview.reviewNumber} onClick={()=>void onLock()}><Lock size={14}/> 심의 완료 문안 잠금</button>}<small>심의받은 문안의 무단 변경을 막기 위한 내부 관리 기능입니다.</small></div>}</section>
 }
-function PhotoPanel({assets,project,onAttach,onRegister,onDelete,onInsertHtml}:{assets:BlogAsset[];project:BlogProject;onAttach:(blockId:string,assetId:string)=>void;onRegister:()=>void;onDelete:(assetId:string)=>void;onInsertHtml:(url:string,name:string)=>void}){
+function PhotoPanel({assets,project,onAttach,onRegister,onDelete,onInsertHtml}:{assets:BlogAsset[];project:BlogProject;onAttach:(blockId:string,assetId:string)=>void;onRegister:()=>void;onDelete:(assetId:string)=>void;onInsertHtml:(url:string,name:string,tags:string[],caption:string)=>void}){
   const imageBlocks=project.blocks.filter(b=>b.type==='image');
   const hasHtmlBlock=project.blocks.some(b=>b.type==='html');
   const [copied,setCopied]=useState('');
@@ -468,7 +495,7 @@ function PhotoPanel({assets,project,onAttach,onRegister,onDelete,onInsertHtml}:{
           {a.caption&&<small style={{color:'#5a6a83',marginTop:1}}>{a.caption}</small>}
         </div>
         <div className="photo-actions">
-          {hasHtmlBlock&&a.url&&<button className="blog26-photo-insert-btn" title="외부 생성 본문(HTML)에 이미지 삽입" onClick={()=>onInsertHtml(a.url,a.name)}>본문 삽입</button>}
+          {hasHtmlBlock&&a.url&&<button className="blog26-photo-insert-btn" title="본문에서 관련 문단을 찾아 사진 삽입" onClick={()=>onInsertHtml(a.url,a.name,a.tags,a.caption||'')}>본문 삽입</button>}
           {imageBlocks.length>0&&<select style={{fontSize:10,padding:'3px 5px',border:'1px solid #e2e8f0',borderRadius:6,background:'#fff',color:'#475569',cursor:'pointer'}} defaultValue="" onChange={e=>e.target.value&&onAttach(e.target.value,a.assetId)}>
             <option value="">이미지 블록 선택</option>
             {imageBlocks.map((b,i)=><option key={b.blockId} value={b.blockId}>이미지 블록 {i+1}</option>)}

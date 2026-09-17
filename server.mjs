@@ -1276,8 +1276,8 @@ fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 function serveStatic(pathname, res) {
   // 업로드된 사진 파일 서빙
   if (pathname.startsWith('/uploads/')) {
-    const safeName = pathname.replace(/^\/+/, '').replace(/\.\./g, '');
-    const filePath = path.resolve(__dirname, 'data', safeName);
+    const relativePath = pathname.slice('/uploads/'.length).replace(/\.\./g, '').replace(/^\/+/, '');
+    const filePath = path.resolve(__dirname, 'data', relativePath);
     if (!filePath.startsWith(path.resolve(__dirname, 'data'))) { res.writeHead(403); res.end('Forbidden'); return; }
     const ext = path.extname(filePath);
     fs.readFile(filePath, (error, data) => {
