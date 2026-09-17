@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Check, ChevronLeft, ClipboardCopy, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
@@ -59,10 +59,20 @@ export function VideoScriptPage() {
   };
   const patchLocal = (changes: Partial<VideoScriptProject>) => project && setProject({ ...project, ...changes });
   const [aiLoading, setAiLoading] = useState(false);
+  const videoIdempotencyKeyRef = useRef<string>('');
+  const ensureVideoIdempotencyKey = () => {
+    if (!videoIdempotencyKeyRef.current) {
+      videoIdempotencyKeyRef.current = `vid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    return videoIdempotencyKeyRef.current;
+  };
+  useEffect(() => { videoIdempotencyKeyRef.current = ''; }, [projectId]);
   const generateWithAi = async () => {
     if (!project) return; setAiLoading(true);
     try {
-      const result = await apiFetch<{scenes:VideoScene[]}>('/api/video-scripts/generate', { method:'POST', body: JSON.stringify({ advertiserName: project.advertiserName, videoType: project.videoType, targetSeconds: project.targetSeconds, keyMessage: project.keyMessage, cta: project.cta }) });
+      if (!project.advertiserId) { setNotice('광고주를 선택한 뒤 AI 생성을 실행해주세요.'); return; }
+      const iKey = ensureVideoIdempotencyKey();
+      const result = await apiFetch<{scenes:VideoScene[]}>('/api/video-scripts/generate', { method:'POST', body: JSON.stringify({ advertiserId: project.advertiserId, advertiserName: project.advertiserName, idempotencyKey: iKey, videoType: project.videoType, targetSeconds: project.targetSeconds, keyMessage: project.keyMessage, cta: project.cta }) });
       if (result.scenes?.length) patchLocal({ scenes: result.scenes.map((s,i) => ({ ...s, sceneId: uid('scene'), order: i+1 })) });
       setNotice('AI가 장면을 생성했습니다. 내용을 검토하고 필요한 부분을 수정해주세요.');
     } catch (e) {

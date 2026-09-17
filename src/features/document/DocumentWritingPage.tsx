@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Check, ChevronLeft, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
@@ -54,10 +54,21 @@ export function DocumentWritingPage() {
   };
   const patchLocal = (changes: Partial<DocumentProject>) => project && setProject({ ...project, ...changes });
   const [aiLoading, setAiLoading] = useState(false);
+  const docIdempotencyKeyRef = useRef<string>('');
+  const ensureDocIdempotencyKey = () => {
+    if (!docIdempotencyKeyRef.current) {
+      docIdempotencyKeyRef.current = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    return docIdempotencyKeyRef.current;
+  };
+  // 프로젝트 변경 시 키 리셋
+  useEffect(() => { docIdempotencyKeyRef.current = ''; }, [projectId]);
   const generateWithAi = async () => {
     if (!project) return; setAiLoading(true);
     try {
-      const result = await apiFetch<{blocks:DocumentBlock[]}>('/api/documents/generate', { method:'POST', body: JSON.stringify({ advertiserName: project.advertiserName, documentType: project.documentType, topic: project.title }) });
+      if (!project.advertiserId) { setNotice('광고주를 선택한 뒤 AI 생성을 실행해주세요.'); return; }
+      const iKey = ensureDocIdempotencyKey();
+      const result = await apiFetch<{blocks:DocumentBlock[]}>('/api/documents/generate', { method:'POST', body: JSON.stringify({ advertiserId: project.advertiserId, advertiserName: project.advertiserName, idempotencyKey: iKey, documentType: project.documentType, topic: project.title }) });
       if (result.blocks?.length) patchLocal({ blocks: result.blocks.map(b => ({ ...b, blockId: uid('doc') })) });
       setNotice('AI가 문서 초안을 생성했습니다. 내용을 검토하고 필요한 부분을 수정해주세요.');
     } catch (e) {

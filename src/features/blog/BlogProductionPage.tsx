@@ -141,6 +141,27 @@ export function BlogProductionPage(){
     finally{setLoading(false);}
   };
   useEffect(()=>{void reload();},[projectId]);
+  useEffect(()=>{
+    // 프로젝트 변경·새로고침 시 해당 프로젝트의 미완료 생성 시도를 서버에서 복구합니다.
+    // pendingIdempotencyKey는 컴포넌트 상태에만 있어 새로고침 시 사라지므로,
+    // 서버의 blog_generation_requests에서 processing/awaiting_overage 행을 조회합니다.
+    if (!projectId) { setPendingIdempotencyKey(null); setRetryReason(null); return; }
+    blogApi.pendingGeneration(projectId).then(res => {
+      if (!res.pending) { setPendingIdempotencyKey(null); setRetryReason(null); return; }
+      // 서버에 미완료 시도가 있으면 키를 복원해 재시도 시 같은 키를 사용합니다.
+      setPendingIdempotencyKey(res.pending.idempotencyKey);
+      if (res.pending.status === 'awaiting_overage') {
+        setRetryReason(null); // 초과 과금 동의 UI는 별도로 표시
+        setOverageConfirm({ message: '이전 생성 시도에서 초과 과금 동의가 필요했습니다. 동의 후 재시도해주세요.' });
+      } else if (res.pending.status === 'processing') {
+        setRetryReason(res.pending.hasResult ? 'save_failed' : 'request_uncertain');
+        if (!res.pending.hasResult) {
+          setNotice('이전 생성 요청이 아직 처리 중이거나 결과가 불확실합니다. 같은 키로 재시도하면 중복 과금 없이 결과를 확인합니다.');
+        }
+      }
+    }).catch(() => { /* 복구 실패는 조용히 무시 - 새로 생성 가능 */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
   useEffect(()=>{if(!projectId)setSelectedAdvertiser(isAllSelected?'':globalAdvertiserId);},[globalAdvertiserId,isAllSelected,projectId]);
   useEffect(()=>{void blogApi.aiStatus().then(setAiStatus).catch(()=>setAiStatus({configured:false,provider:null}));},[]);
   useEffect(()=>{

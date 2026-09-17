@@ -738,7 +738,7 @@ async function ensureAutopostProSeatsTable() {
       project_id TEXT,
       idempotency_key TEXT NOT NULL,
       provider_draft_id TEXT,
-      status TEXT NOT NULL DEFAULT 'requested', -- requested|processing|ai_completed|completed|failed
+      status TEXT NOT NULL DEFAULT 'requested', -- requested|processing|awaiting_overage|ai_completed|completed|failed
       billing JSONB,
       result JSONB,
       -- 같은 idempotency_key로 다른 브리프(키워드·업종 등)가 오면 거절하기 위한 지문입니다.
@@ -753,6 +753,8 @@ async function ensureAutopostProSeatsTable() {
   `);
   await pgPool.query(`ALTER TABLE blog_generation_requests ADD COLUMN IF NOT EXISTS brief_fingerprint TEXT`);
   await pgPool.query(`ALTER TABLE blog_generation_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`);
+  // 광고·문서·영상 generate 결과 캐싱 - replayed 시 AI 재호출 없이 결과 반환
+  await pgPool.query(`ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS result JSONB`);
   // 같은 tenant_id 안에서도 idempotency_key는 항상 유일해야 안전합니다(이미 UNIQUE지만,
   // tenant_id를 함께 넣어 여러 테넌트를 운영하게 되어도 안전하도록 복합 인덱스도 둡니다).
   await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_blog_gen_requests_tenant_key ON blog_generation_requests(tenant_id, idempotency_key)`);
@@ -965,6 +967,11 @@ function getFeatureLimit(sub, feature) {
 /**
  * 원자적 사용량 예약 - Universe의 reserveUsage()와 동일합니다. sourceId(idempotency key)로
  * 재시도를 안전하게 처리하고, advisory lock으로 동시 요청의 경쟁 상태를 막습니다.
+ * 상태별 처리:
+ *   confirmed → 이미 완료된 시도. replayed:true로 반환(AI 재호출 없음).
+ *   pending   → 처리 중인 시도. 중복 실행을 막기 위해 reserved:true/replayed:true 반환.
+ *   failed    → 확실한 실패. 현재 구독·한도를 재확인하고 재예약합니다.
+ *   (없음)    → 최초 시도. 구독·한도 확인 후 신규 예약합니다.
  */
 async function reserveUsage(tenantId, advertiserId, feature, action, sourceId, quantity = 1) {
   const client = await pgPool.connect();
@@ -976,8 +983,20 @@ async function reserveUsage(tenantId, advertiserId, feature, action, sourceId, q
         [advertiserId, feature, action, sourceId]
       );
       if (existing.rows.length) {
-        await client.query('COMMIT');
-        return { reserved: true, replayed: true, event: existing.rows[0], check: null };
+        const ev = existing.rows[0];
+        if (ev.status === 'confirmed') {
+          // 이미 완료된 시도 - 외부 AI를 다시 호출하지 않도록 replayed:true로 반환합니다.
+          await client.query('COMMIT');
+          return { reserved: true, replayed: true, event: ev, check: null };
+        }
+        if (ev.status === 'pending') {
+          // 처리 중인 시도 - 중복 실행을 막습니다.
+          await client.query('COMMIT');
+          return { reserved: true, replayed: true, event: ev, check: null };
+        }
+        // status === 'failed' → 확실한 실패 기록. 현재 구독·한도를 다시 확인하고 재예약합니다.
+        // 실패 기록이 있다고 해서 즉시 reserved:true를 반환하지 않습니다(구독 해지 후에도
+        // 실패 기록 재사용으로 생성이 허용되는 버그를 방지합니다).
       }
     }
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`usage:${advertiserId}:${feature}`]);
@@ -1013,11 +1032,26 @@ async function reserveUsage(tenantId, advertiserId, feature, action, sourceId, q
       await client.query('COMMIT');
       return { reserved: false, replayed: false, event: null, check };
     }
-    const insertEvent = await client.query(
-      `INSERT INTO usage_events (tenant_id, advertiser_id, subscription_id, feature, action, quantity, source_id, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending') RETURNING *`,
-      [tenantId, advertiserId, sub.id, feature, action, quantity, sourceId || null]
-    );
+    // 같은 sourceId의 실패 기록이 있으면 UPDATE로 교체합니다(신규 INSERT 대신).
+    // 이렇게 해야 UNIQUE 충돌 없이 재예약하면서 이전 실패 기록이 제거됩니다.
+    let insertEvent;
+    if (sourceId) {
+      const failedRow = await client.query(
+        `UPDATE usage_events SET status='pending', tenant_id=$1, subscription_id=$2, quantity=$3, created_at=now()
+         WHERE advertiser_id=$4 AND feature=$5 AND action=$6 AND source_id=$7 AND status='failed' RETURNING *`,
+        [tenantId, sub.id, quantity, advertiserId, feature, action, sourceId]
+      );
+      if (failedRow.rows.length) {
+        insertEvent = failedRow;
+      }
+    }
+    if (!insertEvent) {
+      insertEvent = await client.query(
+        `INSERT INTO usage_events (tenant_id, advertiser_id, subscription_id, feature, action, quantity, source_id, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending') RETURNING *`,
+        [tenantId, advertiserId, sub.id, feature, action, quantity, sourceId || null]
+      );
+    }
     await client.query('COMMIT');
     return { reserved: true, replayed: false, event: insertEvent.rows[0], check };
   } catch (err) {
@@ -1027,9 +1061,16 @@ async function reserveUsage(tenantId, advertiserId, feature, action, sourceId, q
     client.release();
   }
 }
-async function confirmUsageReservation(eventId) {
+async function confirmUsageReservation(eventId, result = null) {
   if (!eventId) return;
-  await pgPool.query(`UPDATE usage_events SET status='confirmed' WHERE id=$1 AND status='pending'`, [eventId]);
+  if (result !== null) {
+    await pgPool.query(
+      `UPDATE usage_events SET status='confirmed', result=$2 WHERE id=$1 AND status='pending'`,
+      [eventId, JSON.stringify(result)]
+    );
+  } else {
+    await pgPool.query(`UPDATE usage_events SET status='confirmed' WHERE id=$1 AND status='pending'`, [eventId]);
+  }
 }
 async function refundUsageReservation(eventId) {
   if (!eventId) return;
@@ -1302,6 +1343,10 @@ const server = http.createServer(async (req, res) => {
           if (!reservation.reserved) {
             return sendJson(res, 403, { error: reservation.check?.reason || '이번 달 광고 제작 생성 한도를 초과했습니다.', usage: reservation.check });
           }
+          // replayed=true: 이미 완료된 시도 → 저장된 결과를 반환하고 AI 재호출하지 않습니다.
+          if (reservation.replayed && reservation.event?.result) {
+            return sendJson(res, 200, { ...reservation.event.result, replayed: true, usageEventId: reservation.event.id });
+          }
           const brief = {
             advertiserName: cleanText(body.advertiserName || '', 120), channel: cleanText(body.channel || '', 60), objective: cleanText(body.objective || '', 60),
             target: cleanText(body.target || '', 200), keyBenefit: cleanText(body.keyBenefit || '', 300), hookType: cleanText(body.hookType || '', 60),
@@ -1316,8 +1361,9 @@ const server = http.createServer(async (req, res) => {
           const userPrompt = `아래 브리프로 광고 후킹 문구와 카피 시안을 작성하세요.\n${JSON.stringify(brief)}`;
           try {
             const parsed = await callContentAiJson(systemPrompt, userPrompt);
-            await confirmUsageReservation(reservation.event?.id);
-            return sendJson(res, 200, { hooks: parsed.hooks || [], copyVariants: parsed.copyVariants || [], usageEventId: reservation.event?.id });
+            const resultPayload = { hooks: parsed.hooks || [], copyVariants: parsed.copyVariants || [] };
+            await confirmUsageReservation(reservation.event?.id, resultPayload);
+            return sendJson(res, 200, { ...resultPayload, usageEventId: reservation.event?.id });
           } catch (err) {
             // 확실한 실패(AI 응답 파싱 실패, API 에러 등) - 예약을 반환합니다. 타임아웃처럼
             // 외부에서 실제로 생성됐는지 불명확한 경우는 여기 없습니다(이 API는 결과를
@@ -1369,7 +1415,17 @@ const server = http.createServer(async (req, res) => {
         if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
 
         if (req.method === 'GET' && pathname === '/api/templates') {
-          const r = await pgPool.query(`SELECT id, data FROM content_templates WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          // 광고주 범위 제한: advertiser_id가 NULL인 공용 템플릿은 모두 볼 수 있고,
+          // 특정 광고주 소속 템플릿은 접근 가능한 광고주 것만 반환합니다.
+          let r;
+          if (payload.advertiserIds !== null) {
+            r = await pgPool.query(
+              `SELECT id, data FROM content_templates WHERE tenant_id=$1 AND (advertiser_id IS NULL OR advertiser_id::text = ANY($2::text[])) ORDER BY updated_at DESC`,
+              [tenantId, payload.advertiserIds]
+            );
+          } else {
+            r = await pgPool.query(`SELECT id, data FROM content_templates WHERE tenant_id=$1 ORDER BY updated_at DESC`, [tenantId]);
+          }
           return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), templateId: row.id })));
         }
         if (req.method === 'POST' && pathname === '/api/templates') {
@@ -1378,6 +1434,8 @@ const server = http.createServer(async (req, res) => {
           row.templateId = makeId('tpl');
           let advertiserUuid = null;
           if (row.advertiserId) {
+            // 광고주 소속 템플릿은 해당 광고주에 접근 권한이 있어야 생성 가능합니다.
+            if (!ctxCanAccessAdvertiser(payload, row.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
             const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
             if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
             advertiserUuid = advRes.rows[0].id; row.advertiserName = advRes.rows[0].name;
@@ -1389,14 +1447,21 @@ const server = http.createServer(async (req, res) => {
         if (templateMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
           const id = decodeURIComponent(templateMatch[1]);
           const patch = await readJson(req);
-          const cur = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          // 공용 템플릿(advertiser_id IS NULL)은 owner/전체권한 staff만 수정 가능합니다.
+          if (!cur.rows[0].advertiser_id && payload.advertiserIds !== null) return sendJson(res, 403, { error: '공용 템플릿은 수정 권한이 없습니다.' });
+          if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           const updated = normalizeTemplate(patch, { ...cur.rows[0].data, templateId: id });
           await pgPool.query(`UPDATE content_templates SET template_type=$3, data=$4, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, updated.templateType, JSON.stringify(updated)]);
           return sendJson(res, 200, updated);
         }
         if (templateMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(templateMatch[1]);
+          const cur = await pgPool.query(`SELECT advertiser_id FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!cur.rows[0]) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          if (!cur.rows[0].advertiser_id && payload.advertiserIds !== null) return sendJson(res, 403, { error: '공용 템플릿은 삭제 권한이 없습니다.' });
+          if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           await pgPool.query(`DELETE FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -1404,8 +1469,9 @@ const server = http.createServer(async (req, res) => {
         const duplicateMatch = pathname.match(/^\/api\/templates\/([^/]+)\/duplicate$/);
         if (duplicateMatch && req.method === 'POST') {
           const id = decodeURIComponent(duplicateMatch[1]);
-          const cur = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           const source = cur.rows[0].data;
           const row = normalizeTemplate({ ...source, name: `${source.name} 복사본`, useCount: 0, isFavorite: false }, null);
           row.templateId = makeId('tpl');
@@ -1417,8 +1483,9 @@ const server = http.createServer(async (req, res) => {
         const versionMatch = pathname.match(/^\/api\/templates\/([^/]+)\/new-version$/);
         if (versionMatch && req.method === 'POST') {
           const id = decodeURIComponent(versionMatch[1]);
-          const cur = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           const source = cur.rows[0].data;
           const rootId = source.parentTemplateId || source.templateId;
           const related = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND (id=$2 OR data->>'parentTemplateId'=$2)`, [tenantId, rootId]);
@@ -1466,6 +1533,10 @@ const server = http.createServer(async (req, res) => {
           if (!reservation.reserved) {
             return sendJson(res, 403, { error: reservation.check?.reason || '이번 달 문서 생성 한도를 초과했습니다.', usage: reservation.check });
           }
+          // replayed=true: 이미 완료된 시도 → 저장된 결과를 반환하고 AI 재호출하지 않습니다.
+          if (reservation.replayed && reservation.event?.result) {
+            return sendJson(res, 200, { ...reservation.event.result, replayed: true, usageEventId: reservation.event.id });
+          }
           const brief = { advertiserName: cleanText(body.advertiserName || '', 120), documentType: cleanText(body.documentType || '기획서', 60), topic: cleanText(body.topic || '', 300) };
           const systemPrompt = [
             '당신은 마케팅 업무 문서 초안을 쓰는 보조 작성자입니다.',
@@ -1476,8 +1547,9 @@ const server = http.createServer(async (req, res) => {
           const userPrompt = `아래 정보로 "${brief.documentType}" 문서 초안을 작성하세요.\n${JSON.stringify(brief)}`;
           try {
             const parsed = await callContentAiJson(systemPrompt, userPrompt);
-            await confirmUsageReservation(reservation.event?.id);
-            return sendJson(res, 200, { blocks: Array.isArray(parsed) ? parsed : [], usageEventId: reservation.event?.id });
+            const resultPayload = { blocks: Array.isArray(parsed) ? parsed : [] };
+            await confirmUsageReservation(reservation.event?.id, resultPayload);
+            return sendJson(res, 200, { ...resultPayload, usageEventId: reservation.event?.id });
           } catch (err) {
             await refundUsageReservation(reservation.event?.id);
             return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 문서 생성에 실패했습니다.' });
@@ -1558,6 +1630,10 @@ const server = http.createServer(async (req, res) => {
           if (!reservation.reserved) {
             return sendJson(res, 403, { error: reservation.check?.reason || '이번 달 영상 대본 생성 한도를 초과했습니다.', usage: reservation.check });
           }
+          // replayed=true: 이미 완료된 시도 → 저장된 결과를 반환하고 AI 재호출하지 않습니다.
+          if (reservation.replayed && reservation.event?.result) {
+            return sendJson(res, 200, { ...reservation.event.result, replayed: true, usageEventId: reservation.event.id });
+          }
           const brief = {
             advertiserName: cleanText(body.advertiserName || '', 120), videoType: cleanText(body.videoType || '', 60), targetSeconds: Number(body.targetSeconds) || 30,
             keyMessage: cleanText(body.keyMessage || '', 300), cta: cleanText(body.cta || '', 60),
@@ -1572,8 +1648,9 @@ const server = http.createServer(async (req, res) => {
           const userPrompt = `아래 브리프로 영상 대본 장면을 작성하세요.\n${JSON.stringify(brief)}`;
           try {
             const parsed = await callContentAiJson(systemPrompt, userPrompt);
-            await confirmUsageReservation(reservation.event?.id);
-            return sendJson(res, 200, { scenes: Array.isArray(parsed) ? parsed : [], usageEventId: reservation.event?.id });
+            const resultPayload = { scenes: Array.isArray(parsed) ? parsed : [] };
+            await confirmUsageReservation(reservation.event?.id, resultPayload);
+            return sendJson(res, 200, { ...resultPayload, usageEventId: reservation.event?.id });
           } catch (err) {
             await refundUsageReservation(reservation.event?.id);
             return sendJson(res, 502, { error: err instanceof Error ? err.message : 'AI 영상 대본 생성에 실패했습니다.' });
@@ -2041,44 +2118,55 @@ const server = http.createServer(async (req, res) => {
           if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
           const body = await readJson(req);
           const industry = cleanText(body.industry || '', 40);
-          const text = cleanText(body.text || '', 20000);
           const orgName = cleanText(body.orgName || body.org_name || '', 200);
           const projectId = cleanText(body.projectId || '', 120);
-          if (!industry || !text) return sendJson(res, 400, { error: 'industry와 text가 필요합니다.' });
+          if (!industry || !projectId) return sendJson(res, 400, { error: 'industry와 projectId가 필요합니다.' });
+          // 검수는 반드시 서버에 저장된 확정 버전으로 진행합니다.
+          // 클라이언트가 보내는 body.text를 그대로 쓰면, 저장하지 않은 편집본이나
+          // 완전히 다른 텍스트를 검수 요청에 넣어 저장된 글에 통과 결과를 적용하는
+          // 사고가 발생합니다. 검수 입력은 서버가 직접 생성합니다.
+          const projRes = await pgPool.query('SELECT advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+          if (!projRes.rows.length) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
+          if (!ctxCanAccessAdvertiser(payload, projRes.rows[0].advertiser_id)) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
+          const project = projRes.rows[0].data;
+          // 서버의 저장 blocks에서 검수 텍스트를 생성합니다.
+          const serverText = [project.selectedTitle || '', ...(project.blocks || []).map(b => `${b.title || ''}\n${b.text || ''}`)].join('\n\n').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+          if (!serverText) return sendJson(res, 400, { error: '검수할 본문이 없습니다. 먼저 초안을 생성해주세요.' });
           // 검수 시작 시점의 본문 버전을 기록해둡니다 - 검수는 외부 API 호출이라 시간이
           // 걸리는데, 그 사이에 본문이 바뀌면 도착한 결과가 "이미 지나간 버전"의 결과가
           // 됩니다. 그런 결과를 새 본문에 잘못 적용하지 않기 위해 해시로 비교합니다.
-          let project = null; let contentHashAtStart = null;
-          if (projectId) {
-            const projRes = await pgPool.query('SELECT advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
-            if (!projRes.rows.length) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
-            if (!ctxCanAccessAdvertiser(payload, projRes.rows[0].advertiser_id)) return sendJson(res, 404, { error: '존재하지 않는 프로젝트입니다.' });
-            project = projRes.rows[0].data;
-            contentHashAtStart = crypto.createHash('sha256').update(JSON.stringify({ blocks: project.blocks, selectedTitle: project.selectedTitle })).digest('hex');
-          }
+          const contentHashAtStart = crypto.createHash('sha256').update(JSON.stringify({ blocks: project.blocks, selectedTitle: project.selectedTitle })).digest('hex');
           try {
-            const result = await autopostProRequest('POST', '/v1/compliance', { industry, text, org_name: orgName });
+            // 외부 API에는 서버가 생성한 텍스트를 보냅니다(클라이언트 body.text 무시).
+            const result = await autopostProRequest('POST', '/v1/compliance', { industry, text: serverText, org_name: orgName });
             // 검수 이력은 항상 남깁니다(과거 기록 보존 - 지금 유효한 승인인지와는 별개입니다).
             await pgPool.query(
               `INSERT INTO blog_compliance_checks (tenant_id, project_id, passed, issues) VALUES ($1,$2,$3,$4)`,
               [tenantId, projectId || null, Boolean(result.passed), JSON.stringify(result.issues || [])]
             );
-            if (projectId) {
-              // 결과가 도착한 지금, 본문이 검수 시작 시점과 같은지 다시 확인합니다.
-              const nowRes = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
-              if (!nowRes.rows.length) return sendJson(res, 200, { ...result, applied: false, reason: 'project_deleted' });
-              const nowData = nowRes.rows[0].data;
-              const contentHashNow = crypto.createHash('sha256').update(JSON.stringify({ blocks: nowData.blocks, selectedTitle: nowData.selectedTitle })).digest('hex');
-              if (contentHashNow !== contentHashAtStart) {
-                // 검수 도중 본문이 바뀌었습니다 - 이 결과는 이전 본문에 대한 것이므로 지금
-                // 문서에는 적용하지 않고 폐기합니다(이력에는 이미 남겼습니다).
-                return sendJson(res, 200, { ...result, applied: false, reason: 'content_changed_during_check' });
-              }
-              const stamp = new Date().toISOString();
-              const updatedProject = { ...nowData, autopostCompliance: { ...result, contentHash: contentHashNow, checkedAt: stamp }, updatedAt: stamp };
-              await pgPool.query('UPDATE blog_projects SET data=$3, updated_at=now() WHERE tenant_id=$1 AND id=$2', [tenantId, projectId, JSON.stringify(updatedProject)]);
+            // 결과가 도착한 지금, 본문이 검수 시작 시점과 같은지 다시 확인합니다.
+            const nowRes = await pgPool.query('SELECT data FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+            if (!nowRes.rows.length) return sendJson(res, 200, { ...result, applied: false, reason: 'project_deleted' });
+            const nowData = nowRes.rows[0].data;
+            const contentHashNow = crypto.createHash('sha256').update(JSON.stringify({ blocks: nowData.blocks, selectedTitle: nowData.selectedTitle })).digest('hex');
+            if (contentHashNow !== contentHashAtStart) {
+              // 검수 도중 본문이 바뀌었습니다 - 이 결과는 이전 본문에 대한 것이므로 지금
+              // 문서에는 적용하지 않고 폐기합니다(이력에는 이미 남겼습니다).
+              return sendJson(res, 200, { ...result, applied: false, reason: 'content_changed_during_check' });
             }
-            return sendJson(res, 200, { ...result, applied: Boolean(projectId) });
+            const stamp = new Date().toISOString();
+            const updatedProject = { ...nowData, autopostCompliance: { ...result, contentHash: contentHashNow, checkedAt: stamp }, updatedAt: stamp };
+            // 조건부 UPDATE: 해시가 일치할 때만 갱신합니다(동시 편집 덮어쓰기 방지).
+            const updateRes = await pgPool.query(
+              `UPDATE blog_projects SET data=$3, updated_at=now()
+               WHERE tenant_id=$1 AND id=$2 AND data->>'updatedAt' = $4`,
+              [tenantId, projectId, JSON.stringify(updatedProject), nowData.updatedAt || '']
+            );
+            if (updateRes.rowCount === 0) {
+              // 동시 편집이 발생했습니다 - 결과를 적용하지 않고 이력만 보존합니다.
+              return sendJson(res, 200, { ...result, applied: false, reason: 'concurrent_edit_detected' });
+            }
+            return sendJson(res, 200, { ...result, applied: true });
           } catch (error) {
             return sendJson(res, error?.status || 502, { error: error?.message || '규정검수에 실패했습니다.' });
           }
@@ -2149,6 +2237,23 @@ const server = http.createServer(async (req, res) => {
           if (reqRow?.status === 'processing' && !isStaleProcessing) {
             return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
           }
+          // 초과 과금 동의 대기 중인 요청입니다. confirmOverage=true가 포함됐으면 즉시 재개합니다.
+          // confirmOverage 없이 도착하면 사용자에게 동의 필요 상태임을 다시 알립니다.
+          if (reqRow?.status === 'awaiting_overage') {
+            if (!brief.confirmOverage) {
+              return sendJson(res, 409, { error: '초과 과금 동의가 필요합니다. 동의 후 같은 키로 confirmOverage: true를 포함해 재요청하세요.', code: 'overage_confirm_required' });
+            }
+            // confirmOverage=true → processing으로 전환해 즉시 재개합니다(중복 실행 방지).
+            await pgPool.query(
+              `UPDATE blog_generation_requests SET status='processing', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2 AND status='awaiting_overage'`,
+              [tenantId, idempotencyKey]
+            );
+            const recheck = await pgPool.query('SELECT status FROM blog_generation_requests WHERE tenant_id=$1 AND idempotency_key=$2', [tenantId, idempotencyKey]);
+            if (recheck.rows[0]?.status !== 'processing') {
+              return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
+            }
+            // processing 전환 성공 → 아래 외부 API 호출로 진행합니다(insert 블록 건너뜀).
+          }
 
           let genResult;
           if (reqRow?.status === 'ai_completed') {
@@ -2159,18 +2264,23 @@ const server = http.createServer(async (req, res) => {
             // 외부 호출 전에 먼저 "처리 중" 상태를 원자적으로 등록합니다(UNIQUE 제약이
             // 동시 등록을 막아줍니다) - 같은 키로 동시에 두 요청이 들어와도 AI가 두 번
             // 호출되지 않습니다.
+            // ── 처리권 획득: RETURNING으로 실제로 INSERT/UPDATE된 행을 확인합니다.
+            // ON CONFLICT DO UPDATE ... WHERE 조건이 불충족되면 UPDATE가 적용되지 않아
+            // RETURNING이 0행을 반환합니다. 이를 통해 다른 요청이 이미 processing 상태인지
+            // SELECT를 추가로 조회하지 않고도 정확히 판단합니다(SELECT 후 판단 방식은
+            // 두 요청이 모두 processing을 읽어 양쪽 다 실행하는 경쟁 조건이 있었습니다).
             try {
-              await pgPool.query(
+              const lockResult = await pgPool.query(
                 `INSERT INTO blog_generation_requests (tenant_id, project_id, idempotency_key, status, brief_fingerprint, updated_at)
                  VALUES ($1,$2,$3,'processing',$4,now())
                  ON CONFLICT (idempotency_key) DO UPDATE SET status='processing', brief_fingerprint=$4, updated_at=now()
-                 WHERE blog_generation_requests.status IN ('requested','failed') OR (blog_generation_requests.status='processing' AND blog_generation_requests.updated_at < now() - interval '5 minutes')`,
+                 WHERE blog_generation_requests.status IN ('requested','failed') OR (blog_generation_requests.status='processing' AND blog_generation_requests.updated_at < now() - interval '5 minutes')
+                 RETURNING idempotency_key`,
                 [tenantId, projectId, idempotencyKey, briefFingerprint]
               );
-              const verify = await pgPool.query('SELECT status FROM blog_generation_requests WHERE tenant_id=$1 AND idempotency_key=$2', [tenantId, idempotencyKey]);
-              if (verify.rows[0]?.status !== 'processing') {
-                // 방금 등록에 실패했다는 건 그사이 다른 동시 요청이 먼저 처리 중으로
-                // 등록했다는 뜻입니다 - 경쟁에서 진 요청은 여기서 물러납니다.
+              if (lockResult.rows.length === 0) {
+                // RETURNING이 0행 = 조건부 UPDATE가 적용되지 않음 = 경쟁에서 진 요청.
+                // 방금 우리보다 먼저 processing을 잡은 요청이 있습니다.
                 return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
               }
               const brief2 = { ...brief };
@@ -2183,11 +2293,13 @@ const server = http.createServer(async (req, res) => {
               await confirmUsageReservation(blogUsageReservation.event?.id);
             } catch (error) {
               // 확실한 실패입니다(외부 공급사가 에러를 반환) - failed로 표시해 재시도를 허용합니다.
-              // 초과 과금 확인이 필요한 409는 "실패"가 아니라 "사용자 결정 대기"이므로 failed로
-              // 표시하지 않습니다 - 그래야 같은 키로 confirmOverage만 바꿔 재개할 수 있습니다.
-              // HOWTOM 자체 한도 예약도 같은 원칙으로 처리합니다: 확실한 실패면 반환하고,
-              // 사용자 결정 대기 중이면 그대로 pending으로 둡니다(같은 키로 재시도 시 재사용됨).
-              if (error?.code !== 'overage_confirm_required') {
+              // 초과 과금 확인이 필요한 409는 "실패"가 아니라 "사용자 결정 대기"이므로
+              // awaiting_overage 상태로 전환합니다 - 그래야 같은 키로 confirmOverage=true로
+              // 재시도했을 때 5분 대기 없이 즉시 처리권을 확보할 수 있습니다.
+              // HOWTOM 자체 한도 예약도 같은 원칙: 확실한 실패면 반환, 동의 대기면 pending 유지.
+              if (error?.code === 'overage_confirm_required') {
+                await pgPool.query(`UPDATE blog_generation_requests SET status='awaiting_overage', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
+              } else {
                 await pgPool.query(`UPDATE blog_generation_requests SET status='failed', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
                 await refundUsageReservation(blogUsageReservation.event?.id);
               }
@@ -2232,11 +2344,14 @@ const server = http.createServer(async (req, res) => {
         const styleMatch = pathname.match(/^\/api\/blog\/styles\/([^/]+)$/);
         if (styleMatch && req.method === 'GET') {
           const advertiserId = decodeURIComponent(styleMatch[1]);
+          // 해당 광고주에 접근 권한이 있는지 확인합니다.
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주의 스타일에 접근할 권한이 없습니다.' });
           const r = await pgPool.query(`SELECT data FROM blog_styles WHERE tenant_id=$1 AND advertiser_id::text=$2`, [tenantId, advertiserId]);
           return sendJson(res, 200, r.rows[0]?.data || { advertiserId, tone: '', rules: [], preferredPhrases: [], prohibitedPhrases: [], cta: '', sourceTexts: [] });
         }
         if (styleMatch && req.method === 'PUT') {
           const advertiserId = decodeURIComponent(styleMatch[1]); const body = await readJson(req);
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주의 스타일을 수정할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '광고주를 찾을 수 없습니다.' });
           const updated = { ...body, advertiserId, updatedAt: new Date().toISOString() };
@@ -2244,14 +2359,58 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, updated);
         }
 
+        // ── 미완료(pending) 생성 복구 조회 API ──────────────────────────────────────
+        // 새로고침·장애 발생 후 화면이 프로젝트별·사용자별로 이전 시도를 복원합니다.
+        // processing/awaiting_overage 상태 요청을 반환해 화면이 올바른 상태를 표시합니다.
+        if (req.method === 'GET' && pathname === '/api/blog/pending-generation') {
+          const q = new URL(req.url, 'http://x').searchParams;
+          const projectId = cleanText(q.get('projectId') || '', 120);
+          if (!projectId) return sendJson(res, 400, { error: 'projectId가 필요합니다.' });
+          // 프로젝트 접근 권한 확인
+          const projCheck = await pgPool.query('SELECT advertiser_id FROM blog_projects WHERE tenant_id=$1 AND id=$2', [tenantId, projectId]);
+          if (!projCheck.rows.length || !ctxCanAccessAdvertiser(payload, projCheck.rows[0].advertiser_id)) {
+            return sendJson(res, 404, { error: '프로젝트를 찾을 수 없습니다.' });
+          }
+          // 가장 최근 미완료(처리중·동의대기) 요청을 반환합니다.
+          const pending = await pgPool.query(
+            `SELECT idempotency_key, status, brief_fingerprint, updated_at, result
+             FROM blog_generation_requests
+             WHERE tenant_id=$1 AND project_id=$2 AND status IN ('processing','awaiting_overage')
+             ORDER BY updated_at DESC LIMIT 1`,
+            [tenantId, projectId]
+          );
+          if (!pending.rows.length) return sendJson(res, 200, { pending: null });
+          const row = pending.rows[0];
+          return sendJson(res, 200, {
+            pending: {
+              idempotencyKey: row.idempotency_key,
+              status: row.status,
+              updatedAt: row.updated_at,
+              // ai_completed 결과가 있으면(저장만 실패한 경우) 화면에서 저장만 재시도 가능
+              hasResult: Boolean(row.result),
+            }
+          });
+        }
+
         if (req.method === 'GET' && pathname === '/api/blog/assets') {
-          const r = await pgPool.query(`SELECT id, data FROM blog_assets WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]);
+          // 광고주 범위 필터 적용 - advertiserIds가 있으면 해당 광고주 자산만 반환합니다.
+          let r;
+          if (payload.advertiserIds !== null) {
+            r = await pgPool.query(
+              `SELECT id, data FROM blog_assets WHERE tenant_id=$1 AND data->>'advertiserId' = ANY($2::text[]) ORDER BY created_at DESC`,
+              [tenantId, payload.advertiserIds]
+            );
+          } else {
+            r = await pgPool.query(`SELECT id, data FROM blog_assets WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]);
+          }
           return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), assetId: row.id })));
         }
         if (req.method === 'POST' && pathname === '/api/blog/assets') {
           const body = await readJson(req);
           const row = { assetId: makeId('asset'), advertiserId: cleanText(body.advertiserId, 120), name: cleanText(body.name, 200), url: cleanText(body.url, 1000), tags: Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 80)).filter(Boolean) : [], createdAt: new Date().toISOString() };
           if (!row.advertiserId || !row.name) return sendJson(res, 400, { error: '광고주와 자산명을 입력하세요.' });
+          // 해당 광고주에 접근 권한 확인
+          if (!ctxCanAccessAdvertiser(payload, row.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '광고주를 찾을 수 없습니다.' });
           await pgPool.query(`INSERT INTO blog_assets (id, tenant_id, data) VALUES ($1,$2,$3)`, [row.assetId, tenantId, JSON.stringify(row)]);

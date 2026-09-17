@@ -42,4 +42,10 @@ export const blogApi = {
   saveStyle: (advertiserId: string, body: BlogStyleProfile) => apiFetch<BlogStyleProfile>(`/api/blog/styles/${encodeURIComponent(advertiserId)}`, { method: 'PUT', body: JSON.stringify(body) }),
   assets: () => apiFetch<BlogAsset[]>('/api/blog/assets'),
   addAsset: (body: Partial<BlogAsset>) => apiFetch<BlogAsset>('/api/blog/assets', { method: 'POST', body: JSON.stringify(body) }),
+
+  // 미완료 생성 복구: 새로고침·장애 후 프로젝트의 진행 중 생성 시도를 조회합니다.
+  pendingGeneration: (projectId: string) =>
+    apiFetch<{ pending: { idempotencyKey: string; status: 'processing' | 'awaiting_overage'; updatedAt: string; hasResult: boolean } | null }>(
+      `/api/blog/pending-generation?projectId=${encodeURIComponent(projectId)}`
+    ),
 };

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Archive, Check, ChevronRight, Copy, FileText, Image as ImageIcon, Plus, Save, Search,
@@ -80,10 +80,20 @@ export function AdCreationPage() {
   const [statusFilter,setStatusFilter] = useState<'all'|AdProjectStatus>('all');
   const [viewMode,setViewMode] = useState<'editor'|'list'>('editor');
   const [aiLoading,setAiLoading] = useState(false);
+  // 생성 시도별 idempotency key - 같은 시도의 재시도에서 동일 키를 유지합니다.
+  const [adIdempotencyKey, setAdIdempotencyKey] = useState<string>('');
+  const ensureAdIdempotencyKey = () => {
+    if (adIdempotencyKey) return adIdempotencyKey;
+    const k = `ad-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    setAdIdempotencyKey(k);
+    return k;
+  };
   const generateWithAi = async () => {
     setAiLoading(true);
     try {
-      const result = await apiFetch<{hooks:string[];copyVariants:AdCopyVariant[]}>('/api/ad/generate', { method:'POST', body: JSON.stringify({ advertiserName: draft.advertiserName, channel: draft.channel, objective: draft.objective, target: draft.target, keyBenefit: draft.keyBenefit, hookType: draft.hookType }) });
+      if (!draft.advertiserId) { setNotice('광고주를 선택한 뒤 AI 생성을 실행해주세요.'); return; }
+      const iKey = ensureAdIdempotencyKey();
+      const result = await apiFetch<{hooks:string[];copyVariants:AdCopyVariant[]}>('/api/ad/generate', { method:'POST', body: JSON.stringify({ advertiserId: draft.advertiserId, advertiserName: draft.advertiserName, idempotencyKey: iKey, channel: draft.channel, objective: draft.objective, target: draft.target, keyBenefit: draft.keyBenefit, hookType: draft.hookType }) });
       setDraft(prev => ({
         ...prev,
         hooks: result.hooks?.length ? result.hooks : prev.hooks,
@@ -133,7 +143,7 @@ export function AdCreationPage() {
     }
   };
 
-  useEffect(()=>{ void reload(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ },[projectId]);
+  useEffect(()=>{ void reload(); setAdIdempotencyKey(''); /* eslint-disable-next-line react-hooks/exhaustive-deps */ },[projectId]);
   useEffect(()=>{
     if (projectId || draft.projectId) return;
     const patternAdvertiser = params.get('patternAdvertiser');
