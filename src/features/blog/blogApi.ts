@@ -42,6 +42,18 @@ export const blogApi = {
   saveStyle: (advertiserId: string, body: BlogStyleProfile) => apiFetch<BlogStyleProfile>(`/api/blog/styles/${encodeURIComponent(advertiserId)}`, { method: 'PUT', body: JSON.stringify(body) }),
   assets: () => apiFetch<BlogAsset[]>('/api/blog/assets'),
   addAsset: (body: Partial<BlogAsset>) => apiFetch<BlogAsset>('/api/blog/assets', { method: 'POST', body: JSON.stringify(body) }),
+  /** 실제 이미지 파일을 서버에 업로드합니다. FormData로 전송합니다. */
+  uploadAsset: async (form: FormData): Promise<BlogAsset> => {
+    const token = localStorage.getItem('cs_token') || '';
+    const res = await fetch('/api/blog/assets/upload', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({ error: '업로드 실패' })); throw new Error(e.error || '업로드 실패'); }
+    return res.json();
+  },
+  deleteAsset: (assetId: string) => apiFetch<{ ok: boolean }>(`/api/blog/assets/${encodeURIComponent(assetId)}`, { method: 'DELETE' }),
 
   // 미완료 생성 복구: 새로고침·장애 후 프로젝트의 진행 중 생성 시도를 조회합니다.
   pendingGeneration: (projectId: string) =>

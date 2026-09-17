@@ -59,7 +59,9 @@ export type BlogStyleProfile = {
   sourceTexts:string[];
   updatedAt?:string;
 };
-export type BlogAsset = {assetId:string;advertiserId:string;name:string;url:string;tags:string[];createdAt:string};
+export type BlogAsset = {assetId:string;advertiserId:string;name:string;url:string;tags:string[];caption:string;filePath?:string;createdAt:string};
+/** 오토포스트 Pro 요청에 실어 보내는 사진 항목 */
+export type PhotoEntry = {id:string|number;tags:string;caption:string;url?:string};
 export type ComplianceIssue = {
   id:string;
   severity:'danger'|'warning'|'info';

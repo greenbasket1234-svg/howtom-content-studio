@@ -823,18 +823,60 @@ async function callBlogGenerationProvider(brief) {
     if (!advertiser) throw new Error('광고주를 찾을 수 없습니다.');
     const seatRow = await ensureAutopostProSeat(tenantId, advertiser);
     const idempotencyKey = brief.idempotencyKey ? String(brief.idempotencyKey) : undefined;
+
+    // 광고주의 사진 자산을 photos 배열로 구성해 오토포스트 Pro에 전달합니다.
+    // AI는 파일 자체가 아닌 tags/caption 텍스트만 읽고 사진 위치를 판단합니다.
+    let photosPayload = [];
+    if (brief.advertiserId && pgPool) {
+      const assetRows = await pgPool.query(
+        `SELECT data FROM blog_assets WHERE tenant_id=$1 AND data->>'advertiserId'=$2 ORDER BY created_at DESC LIMIT 200`,
+        [tenantId, brief.advertiserId]
+      ).catch(() => ({ rows: [] }));
+      photosPayload = assetRows.rows
+        .map(r => r.data)
+        .filter(a => a && (a.tags?.length || a.caption))
+        .map(a => ({
+          id: a.assetId,
+          tags: Array.isArray(a.tags) ? a.tags.join(', ') : (a.tags || ''),
+          caption: a.caption || a.name || '',
+          ...(a.url ? { url: a.url } : {}),
+        }));
+    }
+
     try {
-      const draft = await autopostProRequest('POST', `/v1/seats/${seatRow.seat_id}/drafts`, {
-        keyword: brief.primaryKeyword, length: mapLengthToAutopostCode(brief.length ?? brief.targetLength), num_images: Number.isFinite(Number(brief.numImages)) ? Number(brief.numImages) : 1,
+      const reqBody = {
+        keyword: brief.primaryKeyword,
+        length: mapLengthToAutopostCode(brief.length ?? brief.targetLength),
+        num_images: Number.isFinite(Number(brief.numImages)) ? Number(brief.numImages) : 1,
         confirm_overage: Boolean(brief.confirmOverage),
-      }, idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined);
-      // Draft.body는 완성된 HTML이라, 우리 블록 구조 중 'html' 타입 블록 하나로 그대로 담습니다.
-      // title/body 외의 값(id, seat_id, tags, meta_description, billing 전체)도 버리지 않고
-      // 그대로 돌려줘서 호출부가 프로젝트에 저장할 수 있게 합니다.
+        ...(photosPayload.length ? { photos: photosPayload } : {}),
+      };
+      const draft = await autopostProRequest('POST', `/v1/seats/${seatRow.seat_id}/drafts`, reqBody,
+        idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined);
+
+      // image_library_pick 처리: AI가 고른 사진 ID 목록을 블록에 매핑합니다.
+      // draft.body의 [사진N] 자리 표시자를 실제 assetId로 교체하고 image 블록을 생성합니다.
+      let bodyHtml = draft.body || '';
+      const imagePick = Array.isArray(draft.image_library_pick) ? draft.image_library_pick : [];
+      const photoMap = new Map(photosPayload.map(p => [String(p.id), p]));
+
+      // [사진N] → assetId/img 태그로 교체
+      bodyHtml = bodyHtml.replace(/\[사진(\d+)\]/g, (_, n) => {
+        const idx = Number(n) - 1;
+        const pickedId = imagePick[idx];
+        if (!pickedId) return ''; // null → 자리 제거
+        const photo = photoMap.get(String(pickedId));
+        if (photo?.url) return `<img src="${photo.url}" alt="${photo.caption || ''}" style="max-width:100%;height:auto;"/>`;
+        return ''; // URL 없으면 제거
+      });
+
       return {
         generator: 'autopost-pro',
-        titles: [draft.title], blocks: [{ blockId: `html-${Date.now()}`, type: 'html', title: '', text: draft.body }],
-        billing: draft.billing, providerDraftId: draft.id, seatId: draft.seat_id, tags: draft.tags || [], metaDescription: draft.meta_description || '',
+        titles: [draft.title],
+        blocks: [{ blockId: `html-${Date.now()}`, type: 'html', title: '', text: bodyHtml }],
+        billing: draft.billing, providerDraftId: draft.id, seatId: draft.seat_id,
+        tags: draft.tags || [], metaDescription: draft.meta_description || '',
+        imageLibraryPick: imagePick,
       };
     } catch (error) {
       if (error.code === 'overage_confirm_required') { const e = new Error(error.message); e.code = 'overage_confirm_required'; e.status = 409; throw e; }
@@ -1225,9 +1267,26 @@ function requireDb(res) {
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2',
 };
+// 광고주 사진 파일 업로드 저장 디렉터리 (서버 실행 위치 기준)
+const UPLOADS_DIR = path.join(__dirname, 'data', 'blog-uploads');
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 function serveStatic(pathname, res) {
+  // 업로드된 사진 파일 서빙
+  if (pathname.startsWith('/uploads/')) {
+    const safeName = pathname.replace(/^\/+/, '').replace(/\.\./g, '');
+    const filePath = path.resolve(__dirname, 'data', safeName);
+    if (!filePath.startsWith(path.resolve(__dirname, 'data'))) { res.writeHead(403); res.end('Forbidden'); return; }
+    const ext = path.extname(filePath);
+    fs.readFile(filePath, (error, data) => {
+      if (error) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Not found'); return; }
+      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=31536000' });
+      res.end(data);
+    });
+    return;
+  }
   const requested = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const filePath = path.resolve(DIST_DIR, requested);
   if (!filePath.startsWith(path.resolve(DIST_DIR))) { res.writeHead(403); res.end('Forbidden'); return; }
@@ -2407,14 +2466,116 @@ const server = http.createServer(async (req, res) => {
         }
         if (req.method === 'POST' && pathname === '/api/blog/assets') {
           const body = await readJson(req);
-          const row = { assetId: makeId('asset'), advertiserId: cleanText(body.advertiserId, 120), name: cleanText(body.name, 200), url: cleanText(body.url, 1000), tags: Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 80)).filter(Boolean) : [], createdAt: new Date().toISOString() };
+          const row = {
+            assetId: makeId('asset'),
+            advertiserId: cleanText(body.advertiserId, 120),
+            name: cleanText(body.name, 200),
+            url: cleanText(body.url, 1000),
+            tags: Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 80)).filter(Boolean) : [],
+            caption: cleanText(body.caption || '', 500),
+            createdAt: new Date().toISOString(),
+          };
           if (!row.advertiserId || !row.name) return sendJson(res, 400, { error: '광고주와 자산명을 입력하세요.' });
-          // 해당 광고주에 접근 권한 확인
           if (!ctxCanAccessAdvertiser(payload, row.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '광고주를 찾을 수 없습니다.' });
           await pgPool.query(`INSERT INTO blog_assets (id, tenant_id, data) VALUES ($1,$2,$3)`, [row.assetId, tenantId, JSON.stringify(row)]);
           return sendJson(res, 201, row);
+        }
+
+        // ── 사진 파일 업로드 (multipart/form-data) ───────────────────────
+        if (req.method === 'POST' && pathname === '/api/blog/assets/upload') {
+          const contentType = req.headers['content-type'] || '';
+          if (!contentType.includes('multipart/form-data')) return sendJson(res, 400, { error: 'multipart/form-data 형식으로 전송하세요.' });
+          const boundaryMatch = contentType.match(/boundary=([^\s;]+)/);
+          if (!boundaryMatch) return sendJson(res, 400, { error: 'boundary 없음' });
+          const boundary = '--' + boundaryMatch[1];
+
+          // raw body 수집
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const buf = Buffer.concat(chunks);
+
+          // multipart 파싱 (Node.js 내장만 사용)
+          const sep = Buffer.from('\r\n' + boundary);
+          const fields = {};
+          let fileData = null; let fileName = ''; let fileMime = 'image/jpeg';
+
+          const parts = [];
+          let start = buf.indexOf(boundary);
+          while (start !== -1) {
+            start += boundary.length;
+            if (buf.slice(start, start + 2).toString() === '--') break;
+            if (buf.slice(start, start + 2).toString() === '\r\n') start += 2;
+            const headerEnd = buf.indexOf('\r\n\r\n', start);
+            if (headerEnd === -1) break;
+            const headerStr = buf.slice(start, headerEnd).toString();
+            const bodyStart = headerEnd + 4;
+            const nextBound = buf.indexOf('\r\n' + boundary, bodyStart);
+            const bodyEnd = nextBound === -1 ? buf.length : nextBound;
+            parts.push({ header: headerStr, body: buf.slice(bodyStart, bodyEnd) });
+            start = nextBound === -1 ? -1 : nextBound;
+          }
+
+          for (const part of parts) {
+            const nameMatch = part.header.match(/name="([^"]+)"/);
+            const fileMatch = part.header.match(/filename="([^"]+)"/);
+            const ctMatch = part.header.match(/Content-Type:\s*([^\r\n]+)/i);
+            if (!nameMatch) continue;
+            const fieldName = nameMatch[1];
+            if (fileMatch) {
+              fileName = fileMatch[1].replace(/[^a-zA-Z0-9._\-가-힣]/g, '_');
+              fileMime = ctMatch ? ctMatch[1].trim() : 'image/jpeg';
+              fileData = part.body;
+            } else {
+              fields[fieldName] = part.body.toString('utf-8');
+            }
+          }
+
+          const advertiserId = cleanText(fields.advertiserId || '', 120);
+          if (!advertiserId) return sendJson(res, 400, { error: 'advertiserId가 필요합니다.' });
+          if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          const advRes2 = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, advertiserId]);
+          if (!advRes2.rows[0]) return sendJson(res, 400, { error: '광고주를 찾을 수 없습니다.' });
+          if (!fileData || !fileData.length) return sendJson(res, 400, { error: '파일이 없습니다.' });
+          if (fileData.length > 20 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 20MB 이하여야 합니다.' });
+
+          // 파일 저장
+          const assetId = makeId('asset');
+          const ext = path.extname(fileName) || (fileMime.includes('png') ? '.png' : fileMime.includes('gif') ? '.gif' : fileMime.includes('webp') ? '.webp' : '.jpg');
+          const savedName = `${assetId}${ext}`;
+          const savedPath = path.join(UPLOADS_DIR, savedName);
+          await fs.promises.writeFile(savedPath, fileData);
+
+          const PORT = process.env.PORT || 3001;
+          const baseUrl = process.env.SITE_URL || `http://localhost:${PORT}`;
+          const publicUrl = `${baseUrl}/uploads/blog-uploads/${savedName}`;
+
+          const row = {
+            assetId, advertiserId,
+            name: cleanText(fields.name || fileName || '사진', 200),
+            url: publicUrl,
+            filePath: savedPath,
+            tags: (fields.tags || '').split(',').map(t => t.trim()).filter(Boolean),
+            caption: cleanText(fields.caption || '', 500),
+            createdAt: new Date().toISOString(),
+          };
+          await pgPool.query(`INSERT INTO blog_assets (id, tenant_id, data) VALUES ($1,$2,$3)`, [assetId, tenantId, JSON.stringify(row)]);
+          return sendJson(res, 201, row);
+        }
+
+        // ── 사진 삭제 ──────────────────────────────────────────────────────
+        const assetDeleteMatch = pathname.match(/^\/api\/blog\/assets\/([^/]+)$/);
+        if (assetDeleteMatch && req.method === 'DELETE') {
+          const assetId = assetDeleteMatch[1];
+          const cur = await pgPool.query('SELECT data FROM blog_assets WHERE tenant_id=$1 AND id=$2', [tenantId, assetId]);
+          if (!cur.rows.length) return sendJson(res, 404, { error: '자산을 찾을 수 없습니다.' });
+          const data = cur.rows[0].data;
+          if (!ctxCanAccessAdvertiser(payload, data.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          // 실제 파일도 삭제
+          if (data.filePath) fs.promises.unlink(data.filePath).catch(() => {});
+          await pgPool.query('DELETE FROM blog_assets WHERE tenant_id=$1 AND id=$2', [tenantId, assetId]);
+          return sendJson(res, 200, { ok: true });
         }
       }
 
