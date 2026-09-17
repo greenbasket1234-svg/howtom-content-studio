@@ -2036,9 +2036,9 @@ const server = http.createServer(async (req, res) => {
         const projectMatch = pathname.match(/^\/api\/blog\/projects\/([^/]+)$/);
         if (projectMatch && req.method === 'GET') {
           const id = decodeURIComponent(projectMatch[1]);
-          const r = await pgPool.query(`SELECT id, advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const r = await pgPool.query(`SELECT id, advertiser_id::text as advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!r.rows[0]) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
-          if (!ctxCanAccessAdvertiser(payload, r.rows[0].advertiser_id)) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+          if (r.rows[0].advertiser_id !== null && !ctxCanAccessAdvertiser(payload, r.rows[0].advertiser_id)) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           return sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id });
         }
         if (projectMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
@@ -2065,9 +2065,17 @@ const server = http.createServer(async (req, res) => {
         }
         if (projectMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(projectMatch[1]);
-          const cur = await pgPool.query(`SELECT advertiser_id FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(
+            `SELECT advertiser_id::text as advertiser_id FROM blog_projects WHERE tenant_id=$1 AND id=$2`,
+            [tenantId, id]
+          );
           if (!cur.rows[0]) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
-          if (!ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+          const advId = cur.rows[0].advertiser_id;
+          // advertiser_id가 null인 경우(광고주 삭제·구버전 데이터)는 소유권 검사를 건너뜁니다.
+          // null이 아닌 경우에만 광고주 접근 권한을 확인합니다.
+          if (advId !== null && !ctxCanAccessAdvertiser(payload, advId)) {
+            return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+          }
           await pgPool.query(`DELETE FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
