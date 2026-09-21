@@ -753,6 +753,17 @@ async function ensureAutopostProSeatsTable() {
   `);
   await pgPool.query(`ALTER TABLE blog_generation_requests ADD COLUMN IF NOT EXISTS brief_fingerprint TEXT`);
   await pgPool.query(`ALTER TABLE blog_generation_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`);
+  // 사진 바이너리 파일 저장 테이블: blob_assets에 실제 이진 데이터를 보관하고
+  // blog_assets에는 URL만 저장합니다. /photos/:id 로 인증 없이 서빙합니다.
+  await pgPool.query(`CREATE TABLE IF NOT EXISTS blog_asset_files (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+    size_bytes INTEGER DEFAULT 0,
+    data BYTEA NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+  )`);
+  await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_blog_asset_files_tenant ON blog_asset_files(tenant_id)`);
   // 광고·문서·영상 generate 결과 캐싱 - replayed 시 AI 재호출 없이 결과 반환
   await pgPool.query(`ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS result JSONB`);
   // 같은 tenant_id 안에서도 idempotency_key는 항상 유일해야 안전합니다(이미 UNIQUE지만,
@@ -1305,6 +1316,28 @@ function serveStatic(pathname, res) {
 const server = http.createServer(async (req, res) => {
   try {
     const { pathname } = new URL(req.url || '/', 'http://localhost');
+
+    // ── 사진 공개 서빙 (/photos/:id.ext) ─────────────────────────────────
+    // 인증 불필요 — 네이버 편집기가 붙여넣기 시 외부에서 직접 접근합니다.
+    // URL 형식: /photos/asset-xxx.jpg (확장자 포함)
+    const photoMatch = pathname.match(/^\/photos\/([a-zA-Z0-9_-]+)\.(jpg|jpeg|png|gif|webp)$/);
+    if (req.method === 'GET' && photoMatch) {
+      const assetId = photoMatch[1];
+      if (!pgPool) { res.writeHead(503); res.end('DB not connected'); return; }
+      const row = await pgPool.query(
+        'SELECT data, mime_type FROM blog_asset_files WHERE id=$1',
+        [assetId]
+      ).catch(() => ({ rows: [] }));
+      if (!row.rows[0]) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Not Found'); return; }
+      res.writeHead(200, {
+        'Content-Type': row.rows[0].mime_type || 'image/jpeg',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET',
+      });
+      res.end(row.rows[0].data);
+      return;
+    }
 
     if (req.method === 'GET' && pathname === '/api/health') {
       return sendJson(res, 200, {
@@ -2470,15 +2503,41 @@ const server = http.createServer(async (req, res) => {
           } else {
             r = await pgPool.query(`SELECT id, data FROM blog_assets WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]);
           }
-          // 구버전 데이터에서 localhost URL이 저장된 경우 상대경로로 변환합니다.
-          const fixUrl = (url) => {
-            if (!url) return url;
-            return url.replace(/^https?:\/\/localhost:\d+\/uploads\//, '/uploads/');
+          // base64 data URL을 blog_asset_files로 마이그레이션합니다.
+          // 기존에 저장된 data:image/... URL 자산을 BYTEA로 이전하고 공개 URL로 변환합니다.
+          const fixUrl = async (assetData) => {
+            const url = assetData.url || '';
+            if (!url.startsWith('data:image')) return url; // 이미 정상 URL
+            if (!pgPool) return url;
+            try {
+              const matches = url.match(/^data:(image\/[^;]+);base64,(.+)$/);
+              if (!matches) return url;
+              const mimeType = matches[1];
+              const binary = Buffer.from(matches[2], 'base64');
+              const ext = mimeType.includes('png') ? '.png' : mimeType.includes('gif') ? '.gif' : mimeType.includes('webp') ? '.webp' : '.jpg';
+              const existCheck = await pgPool.query('SELECT id FROM blog_asset_files WHERE id=$1', [assetData.assetId]);
+              if (!existCheck.rows.length) {
+                await pgPool.query(
+                  'INSERT INTO blog_asset_files (id, tenant_id, mime_type, size_bytes, data) VALUES ($1,$2,$3,$4,$5)',
+                  [assetData.assetId, tenantId, mimeType, binary.length, binary]
+                );
+              }
+              const host = req.headers.host || '';
+              const isSecure = process.env.SITE_URL || host.includes('railway.app') || host.includes('howtom');
+              const baseUrl = process.env.SITE_URL || `${isSecure ? 'https' : 'http'}://${host}`;
+              const newUrl = `${baseUrl}/photos/${assetData.assetId}${ext}`;
+              // DB의 blog_assets도 업데이트
+              const updated = { ...assetData, url: newUrl };
+              await pgPool.query('UPDATE blog_assets SET data=$1 WHERE id=$2 AND tenant_id=$3', [JSON.stringify(updated), assetData.assetId, tenantId]).catch(() => {});
+              return newUrl;
+            } catch { return url; }
           };
-          return sendJson(res, 200, r.rows.map(row => {
+
+          return sendJson(res, 200, await Promise.all(r.rows.map(async row => {
             const d = row.data || {};
-            return { ...d, assetId: row.id, url: fixUrl(d.url) };
-          }));
+            const url = await fixUrl({ ...d, assetId: row.id });
+            return { ...d, assetId: row.id, url };
+          })));
         }
         if (req.method === 'POST' && pathname === '/api/blog/assets') {
           const body = await readJson(req);
@@ -2554,20 +2613,29 @@ const server = http.createServer(async (req, res) => {
           const advRes2 = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, advertiserId]);
           if (!advRes2.rows[0]) return sendJson(res, 400, { error: '광고주를 찾을 수 없습니다.' });
           if (!fileData || !fileData.length) return sendJson(res, 400, { error: '파일이 없습니다.' });
-          // Railway 등 ephemeral 파일시스템 환경에서는 배포 시 파일이 사라집니다.
-          // 이미지를 base64 data URL로 변환해 DB에 직접 저장합니다.
-          // 5MB 이하 권장: base64 변환 시 약 1.33배 커지므로 실제 DB 저장은 최대 ~6.7MB.
-          if (fileData.length > 5 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 5MB 이하여야 합니다. 더 큰 파일은 URL 등록 탭을 이용하세요.' });
+          // 10MB 제한 (DB BYTEA 저장 — Railway PostgreSQL 기본 1GB)
+          if (fileData.length > 10 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 10MB 이하여야 합니다.' });
 
           const assetId = makeId('asset');
-          // base64 data URL로 변환 — 서버 파일시스템 없이 항상 표시됩니다.
-          const base64 = fileData.toString('base64');
-          const dataUrl = `data:${fileMime};base64,${base64}`;
+          const ext = fileMime.includes('png') ? '.png' : fileMime.includes('gif') ? '.gif' : fileMime.includes('webp') ? '.webp' : '.jpg';
+
+          // 이진 데이터를 PostgreSQL BYTEA에 저장합니다.
+          // 파일시스템(ephemeral)이 아닌 DB에 저장하므로 배포 후에도 영구 유지됩니다.
+          await pgPool.query(
+            'INSERT INTO blog_asset_files (id, tenant_id, mime_type, size_bytes, data) VALUES ($1,$2,$3,$4,$5)',
+            [assetId, tenantId, fileMime, fileData.length, fileData]
+          );
+
+          // 공개 URL: /photos/:id.ext (인증 없이 접근 가능 — 네이버 편집기에서 사용)
+          const host = req.headers.host || '';
+          const isSecure = process.env.SITE_URL || host.includes('railway.app') || host.includes('howtom');
+          const baseUrl = process.env.SITE_URL || `${isSecure ? 'https' : 'http'}://${host}`;
+          const publicUrl = `${baseUrl}/photos/${assetId}${ext}`;
 
           const row = {
             assetId, advertiserId,
             name: cleanText(fields.name || fileName || '사진', 200),
-            url: dataUrl,
+            url: publicUrl, // https:// 실제 주소 — base64 아님
             tags: (fields.tags || '').split(',').map(t => t.trim()).filter(Boolean),
             caption: cleanText(fields.caption || '', 500),
             createdAt: new Date().toISOString(),
