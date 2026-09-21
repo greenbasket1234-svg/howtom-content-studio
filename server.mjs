@@ -2470,7 +2470,15 @@ const server = http.createServer(async (req, res) => {
           } else {
             r = await pgPool.query(`SELECT id, data FROM blog_assets WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]);
           }
-          return sendJson(res, 200, r.rows.map(row => ({ ...(row.data || {}), assetId: row.id })));
+          // 구버전 데이터에서 localhost URL이 저장된 경우 상대경로로 변환합니다.
+          const fixUrl = (url) => {
+            if (!url) return url;
+            return url.replace(/^https?:\/\/localhost:\d+\/uploads\//, '/uploads/');
+          };
+          return sendJson(res, 200, r.rows.map(row => {
+            const d = row.data || {};
+            return { ...d, assetId: row.id, url: fixUrl(d.url) };
+          }));
         }
         if (req.method === 'POST' && pathname === '/api/blog/assets') {
           const body = await readJson(req);
@@ -2546,24 +2554,20 @@ const server = http.createServer(async (req, res) => {
           const advRes2 = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, advertiserId]);
           if (!advRes2.rows[0]) return sendJson(res, 400, { error: '광고주를 찾을 수 없습니다.' });
           if (!fileData || !fileData.length) return sendJson(res, 400, { error: '파일이 없습니다.' });
-          if (fileData.length > 20 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 20MB 이하여야 합니다.' });
+          // Railway 등 ephemeral 파일시스템 환경에서는 배포 시 파일이 사라집니다.
+          // 이미지를 base64 data URL로 변환해 DB에 직접 저장합니다.
+          // 5MB 이하 권장: base64 변환 시 약 1.33배 커지므로 실제 DB 저장은 최대 ~6.7MB.
+          if (fileData.length > 5 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 5MB 이하여야 합니다. 더 큰 파일은 URL 등록 탭을 이용하세요.' });
 
-          // 파일 저장
           const assetId = makeId('asset');
-          const ext = path.extname(fileName) || (fileMime.includes('png') ? '.png' : fileMime.includes('gif') ? '.gif' : fileMime.includes('webp') ? '.webp' : '.jpg');
-          const savedName = `${assetId}${ext}`;
-          const savedPath = path.join(UPLOADS_DIR, savedName);
-          await fs.promises.writeFile(savedPath, fileData);
-
-          const PORT = process.env.PORT || 3001;
-          const baseUrl = process.env.SITE_URL || `http://localhost:${PORT}`;
-          const publicUrl = `${baseUrl}/uploads/blog-uploads/${savedName}`;
+          // base64 data URL로 변환 — 서버 파일시스템 없이 항상 표시됩니다.
+          const base64 = fileData.toString('base64');
+          const dataUrl = `data:${fileMime};base64,${base64}`;
 
           const row = {
             assetId, advertiserId,
             name: cleanText(fields.name || fileName || '사진', 200),
-            url: publicUrl,
-            filePath: savedPath,
+            url: dataUrl,
             tags: (fields.tags || '').split(',').map(t => t.trim()).filter(Boolean),
             caption: cleanText(fields.caption || '', 500),
             createdAt: new Date().toISOString(),
@@ -2580,8 +2584,7 @@ const server = http.createServer(async (req, res) => {
           if (!cur.rows.length) return sendJson(res, 404, { error: '자산을 찾을 수 없습니다.' });
           const data = cur.rows[0].data;
           if (!ctxCanAccessAdvertiser(payload, data.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
-          // 실제 파일도 삭제
-          if (data.filePath) fs.promises.unlink(data.filePath).catch(() => {});
+          // base64 저장 방식에서는 파일시스템에 별도 파일이 없으므로 DB 레코드만 삭제합니다.
           await pgPool.query('DELETE FROM blog_assets WHERE tenant_id=$1 AND id=$2', [tenantId, assetId]);
           return sendJson(res, 200, { ok: true });
         }

@@ -553,7 +553,7 @@ function AssetModal({advertiserId,assets,imageBlocks,onClose,onAttach,onAdded,on
     <div style={{display:'flex',gap:8,marginBottom:14}}><button className={`btn ${tab==='upload'?'btn-primary':'secondary'}`} onClick={()=>setTab('upload')}>📁 파일 업로드</button><button className={`btn ${tab==='url'?'btn-primary':'secondary'}`} onClick={()=>setTab('url')}>🔗 URL 등록</button></div>
     {tab==='upload'?<form className="blog26-asset-form" onSubmit={addByFile}>
       <label className="blog26-file-drop" onClick={()=>document.getElementById('asset-file-input')?.click()} style={{border:'2px dashed #c3d0e8',borderRadius:10,padding:'18px 14px',textAlign:'center',cursor:'pointer',background:preview?'#f0f4ff':'#fafbfc'}}>
-        {preview?<img src={preview} alt="" style={{maxHeight:120,maxWidth:'100%',borderRadius:8}}/>:<><ImageIcon size={28} color="#8599b5"/><div style={{marginTop:8,fontSize:13,color:'#7a8a9c'}}>클릭하거나 파일을 여기에 놓으세요<br/><small>JPG·PNG·GIF·WEBP · 최대 20MB</small></div></>}
+        {preview?<img src={preview} alt="" style={{maxHeight:120,maxWidth:'100%',borderRadius:8}}/>:<><ImageIcon size={28} color="#8599b5"/><div style={{marginTop:8,fontSize:13,color:'#7a8a9c'}}>클릭하거나 파일을 여기에 놓으세요<br/><small>JPG·PNG·GIF·WEBP · 최대 5MB</small></div></>}
       </label>
       <input id="asset-file-input" type="file" accept="image/*" style={{display:'none'}} onChange={e=>pickFile(e.target.files?.[0]||null)}/>
       <input value={name} onChange={e=>setName(e.target.value)} placeholder="사진 이름 (예: 대표메뉴 한우등심)" required/>
