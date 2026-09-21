@@ -36,7 +36,7 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string }[] }[] = 
 
 export function Layout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
-  const { advertisers, selectedId, setSelectedId, loading } = useAdvertiserContext();
+  const { advertisers, selectedId, setSelectedId, loading, isAdvertiserAccount, selected } = useAdvertiserContext();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const navigate = useNavigate();
   // 광고주 계정은 CONTENT PRO 구독으로 블로그 제작만 이용할 수 있으므로, 여러
@@ -93,10 +93,13 @@ export function Layout({ children }: { children: ReactNode }) {
             <AppSwitcher />
           </div>
           <div className="cs-topbar-actions">
-            <select className="cs-select" value={selectedId} onChange={e => setSelectedId(e.target.value)} disabled={loading} aria-label="광고주 선택">
-              <option value={ALL_ADVERTISERS_ID}>{loading ? '전체 보기 · 불러오는 중...' : `전체 보기${advertisers.length ? ` (${advertisers.length})` : ''}`}</option>
-              {advertisers.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            {isAdvertiserAccount
+              ? <span className="cs-advertiser-badge">{selected?.name || '내 광고주'}</span>
+              : <select className="cs-select" value={selectedId} onChange={e => setSelectedId(e.target.value)} disabled={loading} aria-label="광고주 선택">
+                  <option value={ALL_ADVERTISERS_ID}>{loading ? '전체 보기 · 불러오는 중...' : `전체 보기${advertisers.length ? ` (${advertisers.length})` : ''}`}</option>
+                  {advertisers.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+            }
             <span className="cs-user-name">{user?.name}</span>
             <button className="cs-btn" onClick={() => { logout(); navigate('/login'); }}>로그아웃</button>
           </div>
