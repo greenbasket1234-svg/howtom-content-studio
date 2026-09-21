@@ -2617,13 +2617,53 @@ const server = http.createServer(async (req, res) => {
           if (fileData.length > 10 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 10MB 이하여야 합니다.' });
 
           const assetId = makeId('asset');
-          const ext = fileMime.includes('png') ? '.png' : fileMime.includes('gif') ? '.gif' : fileMime.includes('webp') ? '.webp' : '.jpg';
+
+          // ── 사진 리사이즈 처리 ─────────────────────────────────────────
+          // 처리 순서: EXIF 방향 보정 → RGB 변환 → 긴 변 1280px 축소 → JPEG 품질 82 재인코딩
+          // GPS 등 EXIF 메타데이터는 재인코딩 과정에서 자동 제거됩니다.
+          // sharp가 설치되어 있지 않으면 원본을 그대로 저장합니다.
+          let processedData = fileData;
+          let processedMime = fileMime;
+          const MAX_LONG_EDGE = 1280;
+          const JPEG_QUALITY = 82;
+
+          try {
+            const sharp = (await import('sharp').catch(() => null))?.default;
+            if (sharp && (fileMime.includes('jpeg') || fileMime.includes('jpg') || fileMime.includes('png') || fileMime.includes('webp'))) {
+              const img = sharp(fileData).rotate(); // EXIF 방향 보정 (폰 사진 회전 수정)
+              const meta = await img.metadata();
+              const w = meta.width || 0;
+              const h = meta.height || 0;
+              const longEdge = Math.max(w, h);
+
+              let pipeline = img.toColorspace('srgb'); // RGB 변환
+              if (longEdge > MAX_LONG_EDGE) {
+                // 긴 변 기준 1280px 축소 — 세로 사진은 세로가 1280, 가로는 비율 유지
+                pipeline = pipeline.resize({
+                  width: w >= h ? MAX_LONG_EDGE : undefined,
+                  height: h > w ? MAX_LONG_EDGE : undefined,
+                  fit: 'inside',
+                  withoutEnlargement: true,
+                });
+              }
+              // JPEG 품질 82로 재인코딩 (PNG/WEBP도 JPEG로 변환 — 용량 최적화)
+              processedData = await pipeline.jpeg({ quality: JPEG_QUALITY, mozjpeg: false }).toBuffer();
+              processedMime = 'image/jpeg';
+              console.log(`[사진 리사이즈] ${w}×${h} → ${longEdge > MAX_LONG_EDGE ? '1280px 축소' : '원본 유지'} | ${Math.round(fileData.length/1024)}KB → ${Math.round(processedData.length/1024)}KB`);
+            }
+          } catch (sharpErr) {
+            // sharp 미설치 또는 처리 실패 시 원본 저장
+            console.warn('[사진 리사이즈 건너뜀]', sharpErr?.message || sharpErr);
+            processedData = fileData;
+            processedMime = fileMime;
+          }
+
+          const ext = processedMime.includes('png') ? '.png' : processedMime.includes('gif') ? '.gif' : processedMime.includes('webp') ? '.webp' : '.jpg';
 
           // 이진 데이터를 PostgreSQL BYTEA에 저장합니다.
-          // 파일시스템(ephemeral)이 아닌 DB에 저장하므로 배포 후에도 영구 유지됩니다.
           await pgPool.query(
             'INSERT INTO blog_asset_files (id, tenant_id, mime_type, size_bytes, data) VALUES ($1,$2,$3,$4,$5)',
-            [assetId, tenantId, fileMime, fileData.length, fileData]
+            [assetId, tenantId, processedMime, processedData.length, processedData]
           );
 
           // 공개 URL: /photos/:id.ext (인증 없이 접근 가능 — 네이버 편집기에서 사용)
