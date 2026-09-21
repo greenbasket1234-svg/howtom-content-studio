@@ -2613,8 +2613,9 @@ const server = http.createServer(async (req, res) => {
           const advRes2 = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, advertiserId]);
           if (!advRes2.rows[0]) return sendJson(res, 400, { error: '광고주를 찾을 수 없습니다.' });
           if (!fileData || !fileData.length) return sendJson(res, 400, { error: '파일이 없습니다.' });
-          // 10MB 제한 (DB BYTEA 저장 — Railway PostgreSQL 기본 1GB)
-          if (fileData.length > 10 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 10MB 이하여야 합니다.' });
+          // 원본 수신 한도: 30MB (sharp가 리사이즈하기 전 원본 크기 기준)
+          // 리사이즈 후 실제 저장 크기는 200~400KB로 줄어듭니다.
+          if (fileData.length > 30 * 1024 * 1024) return sendJson(res, 400, { error: '파일은 30MB 이하여야 합니다.' });
 
           const assetId = makeId('asset');
 
@@ -2656,6 +2657,11 @@ const server = http.createServer(async (req, res) => {
             console.warn('[사진 리사이즈 건너뜀]', sharpErr?.message || sharpErr);
             processedData = fileData;
             processedMime = fileMime;
+          }
+
+          // 리사이즈 후 최종 크기 확인 (sharp 없는 경우 원본 크기로 10MB 제한)
+          if (processedData.length > 10 * 1024 * 1024) {
+            return sendJson(res, 400, { error: `파일이 너무 큽니다(${Math.round(processedData.length/1024/1024)}MB). sharp 리사이즈가 작동하지 않은 것 같습니다. 사진을 직접 줄여서 올려주세요.` });
           }
 
           const ext = processedMime.includes('png') ? '.png' : processedMime.includes('gif') ? '.gif' : processedMime.includes('webp') ? '.webp' : '.jpg';
