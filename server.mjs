@@ -23,7 +23,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4100);
 const DIST_DIR = path.join(__dirname, 'dist');
 
-const JWT_SECRET = process.env.JWT_SECRET || '';
+// ── 로그인 Rate Limit ────────────────────────────────────────────────────────
+// 동일 IP의 과도한 로그인 시도를 차단합니다(brute-force 방어).
+// scryptSync는 CPU-intensive해서 반복 요청 시 서버 부하도 큽니다.
+const loginAttempts = new Map(); // ip -> { count, resetAt }
+const LOGIN_MAX = 10;        // 허용 횟수
+const LOGIN_WINDOW_MS = 60_000; // 1분 window
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || entry.resetAt < now) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= LOGIN_MAX) return false;
+  entry.count++;
+  return true;
+}
+// 1시간마다 만료된 항목 정리
+setInterval(() => { const now = Date.now(); for (const [k, v] of loginAttempts) if (v.resetAt < now) loginAttempts.delete(k); }, 3_600_000);
 const ADMIN_EMAIL = process.env.HOWTOM_ADMIN_EMAIL || '';
 const ADMIN_PASSWORD = process.env.HOWTOM_ADMIN_PASSWORD || '';
 const ADMIN_NAME = process.env.HOWTOM_ADMIN_NAME || '관리자';
@@ -1419,6 +1437,11 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/api/login') {
       if (!JWT_SECRET) return sendJson(res, 500, { error: '로그인 환경변수를 설정하세요.' });
+      // 동일 IP에서 1분 내 10회 초과 시 차단합니다.
+      const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+      if (!checkLoginRateLimit(clientIp)) {
+        return sendJson(res, 429, { error: '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.' });
+      }
       const body = await readJson(req);
       const email = String(body.email || '').trim().toLowerCase();
       const password = String(body.password || '');
@@ -1866,6 +1889,11 @@ const server = http.createServer(async (req, res) => {
           const assetType = cleanText(q.get('type') || '', 20);
           const clauses = ['tenant_id = $1']; const params = [tenantId];
           if (assetType) { params.push(assetType); clauses.push(`asset_type = $${params.length}`); }
+          // 광고주 계정은 본인 광고주 자산만 조회합니다.
+          if (payload.advertiserIds !== null) {
+            params.push(payload.advertiserIds);
+            clauses.push(`advertiser_id::text = ANY($${params.length}::text[])`);
+          }
           const r = await pgPool.query(`SELECT id, advertiser_id::text as "advertiserId", asset_type as "assetType", name, url, tags, memo, created_at as "createdAt" FROM content_assets WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params);
           return sendJson(res, 200, r.rows);
         }
@@ -1877,6 +1905,8 @@ const server = http.createServer(async (req, res) => {
           const tags = Array.isArray(body.tags) ? body.tags.map(x => cleanText(x, 60)).filter(Boolean) : [];
           let advertiserUuid = null, advertiserName = null;
           if (body.advertiserId) {
+            // 광고주 계정은 본인 광고주에게만 자산을 추가할 수 있습니다.
+            if (!ctxCanAccessAdvertiser(payload, body.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
             const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]);
             if (advRes.rows[0]) { advertiserUuid = advRes.rows[0].id; advertiserName = advRes.rows[0].name; }
           }
@@ -1887,6 +1917,10 @@ const server = http.createServer(async (req, res) => {
         const assetMatch = pathname.match(/^\/api\/assets\/([^/]+)$/);
         if (assetMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(assetMatch[1]);
+          // 삭제 전 해당 자산이 접근 가능한 광고주 소속인지 확인합니다.
+          const assetCheck = await pgPool.query(`SELECT advertiser_id::text as "advertiserId" FROM content_assets WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!assetCheck.rows[0]) return sendJson(res, 404, { error: '자산을 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, assetCheck.rows[0].advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           await pgPool.query(`DELETE FROM content_assets WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -1935,7 +1969,15 @@ const server = http.createServer(async (req, res) => {
           const q = new URL(req.url, 'http://x').searchParams;
           const advertiserId = cleanText(q.get('advertiserId') || '', 120);
           const clauses = ['r.tenant_id = $1']; const params = [tenantId];
-          if (advertiserId) { params.push(advertiserId); clauses.push(`r.advertiser_id::text = $${params.length}`); }
+          if (advertiserId) {
+            // 요청한 광고주에 접근 가능한지 확인합니다.
+            if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+            params.push(advertiserId); clauses.push(`r.advertiser_id::text = $${params.length}`);
+          } else if (payload.advertiserIds !== null) {
+            // advertiserId 미지정 시 광고주 계정은 본인 광고주만 조회합니다.
+            params.push(payload.advertiserIds);
+            clauses.push(`r.advertiser_id::text = ANY($${params.length}::text[])`);
+          }
           const r = await pgPool.query(
             `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
                     r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
@@ -1955,6 +1997,7 @@ const server = http.createServer(async (req, res) => {
           const id = makeId('ref');
           let advertiserUuid = null;
           if (body.advertiserId) {
+            if (!ctxCanAccessAdvertiser(payload, body.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
             const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]);
             advertiserUuid = advRes.rows[0]?.id || null;
           }
@@ -2020,10 +2063,12 @@ const server = http.createServer(async (req, res) => {
 
         // 레퍼런스 보드 CRUD
         if (req.method === 'GET' && pathname === '/api/reference-boards') {
+          const bClauses = ['b.tenant_id=$1']; const bParams = [tenantId];
+          if (payload.advertiserIds !== null) { bParams.push(payload.advertiserIds); bClauses.push(`b.advertiser_id::text = ANY($${bParams.length}::text[])`); }
           const r = await pgPool.query(
             `SELECT b.id, b.advertiser_id::text as "advertiserId", b.name, b.created_at as "createdAt", COUNT(bi.reference_id)::int as "itemCount"
              FROM reference_boards b LEFT JOIN reference_board_items bi ON bi.board_id = b.id
-             WHERE b.tenant_id=$1 GROUP BY b.id ORDER BY b.created_at DESC`, [tenantId]);
+             WHERE ${bClauses.join(' AND ')} GROUP BY b.id ORDER BY b.created_at DESC`, bParams);
           return sendJson(res, 200, r.rows);
         }
         if (req.method === 'POST' && pathname === '/api/reference-boards') {
@@ -2032,7 +2077,7 @@ const server = http.createServer(async (req, res) => {
           if (!name) return sendJson(res, 400, { error: '보드 이름을 입력하세요.' });
           const id = makeId('board');
           let advertiserUuid = null;
-          if (body.advertiserId) { const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]); advertiserUuid = advRes.rows[0]?.id || null; }
+          if (body.advertiserId) { if (!ctxCanAccessAdvertiser(payload, body.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' }); const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]); advertiserUuid = advRes.rows[0]?.id || null; }
           await pgPool.query(`INSERT INTO reference_boards (id, tenant_id, advertiser_id, name) VALUES ($1,$2,$3,$4)`, [id, tenantId, advertiserUuid, name]);
           return sendJson(res, 201, { id, name });
         }
@@ -2046,7 +2091,11 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { ok: true });
         }
         if (boardMatch && req.method === 'DELETE') {
-          await pgPool.query(`DELETE FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(boardMatch[1])]);
+          const bid = decodeURIComponent(boardMatch[1]);
+          const bcheck = await pgPool.query(`SELECT advertiser_id::text as "aid" FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, bid]);
+          if (!bcheck.rows[0]) return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, bcheck.rows[0].aid)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          await pgPool.query(`DELETE FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, bid]);
           return sendJson(res, 200, { ok: true });
         }
         const boardDetailMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
@@ -2083,7 +2132,12 @@ const server = http.createServer(async (req, res) => {
           const q = new URL(req.url, 'http://x').searchParams;
           const advertiserId = cleanText(q.get('advertiserId') || '', 120);
           const clauses = ['tenant_id=$1']; const params = [tenantId];
-          if (advertiserId) { params.push(advertiserId); clauses.push(`advertiser_id::text=$${params.length}`); }
+          if (advertiserId) {
+            if (!ctxCanAccessAdvertiser(payload, advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+            params.push(advertiserId); clauses.push(`advertiser_id::text=$${params.length}`);
+          } else if (payload.advertiserIds !== null) {
+            params.push(payload.advertiserIds); clauses.push(`advertiser_id::text = ANY($${params.length}::text[])`);
+          }
           const r = await pgPool.query(`SELECT id, advertiser_id::text as "advertiserId", brand_name as "brandName", page_name as "pageName", created_at as "createdAt" FROM reference_competitors WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params);
           return sendJson(res, 200, r.rows);
         }
@@ -2692,8 +2746,13 @@ const server = http.createServer(async (req, res) => {
 
           // ── 사진 리사이즈 처리 ─────────────────────────────────────────
           // 처리 순서: EXIF 방향 보정 → RGB 변환 → 긴 변 1280px 축소 → JPEG 품질 82 재인코딩
-          // GPS 등 EXIF 메타데이터는 재인코딩 과정에서 자동 제거됩니다.
-          // sharp가 설치되어 있지 않으면 원본을 그대로 저장합니다.
+          // ── MIME 서버 측 검증 ──────────────────────────────────────────
+          // 클라이언트가 보낸 Content-Type은 신뢰할 수 없습니다.
+          // 허용된 이미지 형식만 받고, 반드시 Sharp로 재인코딩해 임의 콘텐츠를 차단합니다.
+          const ALLOWED_MIME_PREFIXES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+          const mimeOk = ALLOWED_MIME_PREFIXES.some(m => fileMime.startsWith(m));
+          if (!mimeOk) return sendJson(res, 400, { error: `허용되지 않는 파일 형식입니다(${fileMime}). JPEG·PNG·WEBP·GIF만 업로드할 수 있습니다.` });
+
           let processedData = fileData;
           let processedMime = fileMime;
           const MAX_LONG_EDGE = 1280;
@@ -2701,8 +2760,16 @@ const server = http.createServer(async (req, res) => {
 
           try {
             const sharp = (await import('sharp').catch(() => null))?.default;
-            if (sharp && (fileMime.includes('jpeg') || fileMime.includes('jpg') || fileMime.includes('png') || fileMime.includes('webp'))) {
-              const img = sharp(fileData).rotate(); // EXIF 방향 보정 (폰 사진 회전 수정)
+            if (!sharp) {
+              // sharp 없으면 GIF·SVG 등 위험 형식은 거부합니다.
+              if (fileMime.includes('gif') || fileMime.includes('svg') || fileMime.includes('xml')) {
+                return sendJson(res, 400, { error: 'sharp가 설치되지 않아 이 파일 형식을 안전하게 처리할 수 없습니다. JPEG·PNG만 업로드하거나 npm install sharp를 실행하세요.' });
+              }
+            } else {
+              // 모든 이미지를 Sharp로 디코딩 → JPEG로 재인코딩합니다.
+              // 이 과정이 성공하면 실제 이미지 파일임이 검증됩니다.
+              // SVG/HTML 등이 이미지 확장자로 위장한 경우도 여기서 차단됩니다.
+              const img = sharp(fileData).rotate(); // EXIF 방향 보정
               const meta = await img.metadata();
               const w = meta.width || 0;
               const h = meta.height || 0;
@@ -2710,7 +2777,6 @@ const server = http.createServer(async (req, res) => {
 
               let pipeline = img.toColorspace('srgb'); // RGB 변환
               if (longEdge > MAX_LONG_EDGE) {
-                // 긴 변 기준 1280px 축소 — 세로 사진은 세로가 1280, 가로는 비율 유지
                 pipeline = pipeline.resize({
                   width: w >= h ? MAX_LONG_EDGE : undefined,
                   height: h > w ? MAX_LONG_EDGE : undefined,
@@ -2718,16 +2784,15 @@ const server = http.createServer(async (req, res) => {
                   withoutEnlargement: true,
                 });
               }
-              // JPEG 품질 82로 재인코딩 (PNG/WEBP도 JPEG로 변환 — 용량 최적화)
+              // 출력은 항상 JPEG — 형식 통일 + GPS 등 EXIF 자동 제거
               processedData = await pipeline.jpeg({ quality: JPEG_QUALITY, mozjpeg: false }).toBuffer();
               processedMime = 'image/jpeg';
-              console.log(`[사진 리사이즈] ${w}×${h} → ${longEdge > MAX_LONG_EDGE ? '1280px 축소' : '원본 유지'} | ${Math.round(fileData.length/1024)}KB → ${Math.round(processedData.length/1024)}KB`);
+              console.log(`[사진 처리] ${w}×${h} → ${longEdge > MAX_LONG_EDGE ? '1280px 축소' : '원본 유지'} | ${Math.round(fileData.length/1024)}KB → ${Math.round(processedData.length/1024)}KB`);
             }
           } catch (sharpErr) {
-            // sharp 미설치 또는 처리 실패 시 원본 저장
-            console.warn('[사진 리사이즈 건너뜀]', sharpErr?.message || sharpErr);
-            processedData = fileData;
-            processedMime = fileMime;
+            // Sharp 디코딩 실패 = 유효하지 않은 이미지 파일로 판단하고 거부합니다.
+            console.warn('[사진 처리 실패]', sharpErr?.message || sharpErr);
+            return sendJson(res, 400, { error: '유효한 이미지 파일이 아닙니다. JPEG·PNG·WEBP 파일을 올려주세요.' });
           }
 
           // 리사이즈 후 최종 크기 확인 (sharp 없는 경우 원본 크기로 10MB 제한)
@@ -2771,7 +2836,20 @@ const server = http.createServer(async (req, res) => {
           const data = cur.rows[0].data;
           if (!ctxCanAccessAdvertiser(payload, data.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           // base64 저장 방식에서는 파일시스템에 별도 파일이 없으므로 DB 레코드만 삭제합니다.
-          await pgPool.query('DELETE FROM blog_assets WHERE tenant_id=$1 AND id=$2', [tenantId, assetId]);
+          // 현재는 BYTEA 방식이므로 blog_assets와 blog_asset_files를 트랜잭션으로 함께 삭제합니다.
+          // 이렇게 해야 /photos/:id URL이 삭제 후에도 계속 응답하는 문제를 막을 수 있습니다.
+          const pgClient = await pgPool.connect();
+          try {
+            await pgClient.query('BEGIN');
+            await pgClient.query('DELETE FROM blog_asset_files WHERE id=$1 AND tenant_id=$2', [assetId, tenantId]);
+            await pgClient.query('DELETE FROM blog_assets WHERE tenant_id=$1 AND id=$2', [tenantId, assetId]);
+            await pgClient.query('COMMIT');
+          } catch (delErr) {
+            await pgClient.query('ROLLBACK');
+            throw delErr;
+          } finally {
+            pgClient.release();
+          }
           return sendJson(res, 200, { ok: true });
         }
       }
