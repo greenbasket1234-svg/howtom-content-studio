@@ -2292,14 +2292,19 @@ const server = http.createServer(async (req, res) => {
         }
         // ── 아래 3개는 여러 광고주를 관리하는 내부 직원 전용 기능입니다.
         // 광고주 계정(type==='advertiser')은 본인 좌석 하나만 조회/생성할 수 있고, 정지·재개·
-        // 전체목록·전체사용량 같은 관리 기능에는 아예 접근할 수 없습니다 - 담당 광고주가
-        // 1곳뿐인 "직원"과 혼동하면 안 되므로 advertiserScopeId(파생값)가 아니라 실제
-        // 계정 종류(payload.type)로 판단합니다.
-        if (payload.type === 'advertiser' && (
+        // 전체목록·전체사용량·좌석 정지/활성화 같은 관리 기능은
+        // owner 또는 관리자 권한(content.blog 이상 아닌 settings.manage) 계정만 접근 가능합니다.
+        // 광고주 계정이나 일반 직원은 타 광고주 좌석을 조작할 수 없습니다.
+        const isAdminAction = (
           (req.method === 'POST' && (pathname === '/api/blog/autopost-pro/seat/suspend' || pathname === '/api/blog/autopost-pro/seat/activate')) ||
           (req.method === 'GET' && (pathname === '/api/blog/autopost-pro/seats' || pathname === '/api/blog/autopost-pro/usage'))
-        )) {
-          return sendJson(res, 403, { error: '이 기능은 관리자 전용입니다.' });
+        );
+        if (isAdminAction) {
+          const isOwnerOrAdmin = payload.type === 'owner' ||
+            (payload.type === 'staff' && Array.isArray(payload.permissionKeys) && payload.permissionKeys.includes('settings.manage'));
+          if (!isOwnerOrAdmin) {
+            return sendJson(res, 403, { error: '이 기능은 관리자 전용입니다.' });
+          }
         }
         if (req.method === 'POST' && (pathname === '/api/blog/autopost-pro/seat/suspend' || pathname === '/api/blog/autopost-pro/seat/activate')) {
           if (!autopostProConfigured()) return sendJson(res, 400, { error: '오토포스트 Pro가 아직 연결되지 않았습니다.' });
@@ -2687,13 +2692,29 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && pathname === '/api/blog/assets/upload') {
           const contentType = req.headers['content-type'] || '';
           if (!contentType.includes('multipart/form-data')) return sendJson(res, 400, { error: 'multipart/form-data 형식으로 전송하세요.' });
+          // Content-Length 선검사: 본문을 읽기 전에 크기를 미리 확인합니다.
+          // 30MB를 초과하는 요청은 메모리에 올리지 않고 즉시 거부합니다.
+          const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
+          const declaredLength = parseInt(req.headers['content-length'] || '0', 10);
+          if (declaredLength > MAX_UPLOAD_BYTES) {
+            req.resume(); // 소켓을 비워 연결을 정상 종료합니다.
+            return sendJson(res, 413, { error: `파일이 너무 큽니다(${Math.round(declaredLength / 1024 / 1024)}MB). 30MB 이하로 올려주세요.` });
+          }
           const boundaryMatch = contentType.match(/boundary=([^\s;]+)/);
           if (!boundaryMatch) return sendJson(res, 400, { error: 'boundary 없음' });
           const boundary = '--' + boundaryMatch[1];
 
-          // raw body 수집
+          // raw body 수집 — 실제 수신량도 누적하며 30MB 초과 즉시 중단합니다.
           const chunks = [];
-          for await (const chunk of req) chunks.push(chunk);
+          let received = 0;
+          for await (const chunk of req) {
+            received += chunk.length;
+            if (received > MAX_UPLOAD_BYTES) {
+              req.destroy();
+              return sendJson(res, 413, { error: '파일이 너무 큽니다. 30MB 이하로 올려주세요.' });
+            }
+            chunks.push(chunk);
+          }
           const buf = Buffer.concat(chunks);
 
           // multipart 파싱 (Node.js 내장만 사용)
