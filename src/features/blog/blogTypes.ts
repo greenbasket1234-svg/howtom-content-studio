@@ -10,7 +10,7 @@ export type BlogMedicalReview = {
 export type AutopostBilling = { billable:boolean; plan:'trial'|'paid'; quota_used:number; quota_limit:number; overage:boolean; overage_price_krw:number };
 export type AutopostSeat = { id:string; plan:'trial'|'paid'; trial_remaining?:number; status:'active'|'suspended' };
 export type AutopostComplianceIssue = { category:string; label:string; law:string; guide:string; matched:string[] };
-export type AutopostComplianceResult = { passed:boolean; issues:AutopostComplianceIssue[]; applied?:boolean; reason?:string; contentHash?:string; checkedAt?:string };
+export type AutopostComplianceResult = { passed:boolean; issues:AutopostComplianceIssue[]; applied?:boolean; reason?:string; contentHash?:string; checkedAt?:string; _projectSnapshot?:string };
 
 export type BlogProject = {
   projectId:string;

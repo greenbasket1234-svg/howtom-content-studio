@@ -1625,6 +1625,11 @@ const server = http.createServer(async (req, res) => {
             const advRes = await pgPool.query(`SELECT id, name FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId]);
             if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
             advertiserUuid = advRes.rows[0].id; row.advertiserName = advRes.rows[0].name;
+          } else {
+            // 공용 템플릿(advertiserId 없음)은 owner/settings.manage 권한만 생성 가능합니다.
+            const isAdmin = payload.type === 'owner' ||
+              (payload.type === 'staff' && Array.isArray(payload.permissionKeys) && payload.permissionKeys.includes('settings.manage'));
+            if (!isAdmin) return sendJson(res, 403, { error: '공용 템플릿은 관리자만 생성할 수 있습니다. 광고주를 지정하거나 관리자에게 문의하세요.' });
           }
           await pgPool.query(`INSERT INTO content_templates (id, tenant_id, advertiser_id, template_type, data) VALUES ($1,$2,$3,$4,$5)`, [row.templateId, tenantId, advertiserUuid, row.templateType, JSON.stringify(row)]);
           return sendJson(res, 201, row);
@@ -1959,7 +1964,10 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { enabled: adLibraryConfigured(), hoursKst: REFERENCE_WORKER_HOURS_KST, lastRunAt: referenceWorkerStatus.lastRunAt, lastResult: referenceWorkerStatus.lastResult });
         }
         if (req.method === 'POST' && pathname === '/api/references/worker-run-now') {
-          // 사용자가 "지금 바로 실행" 버튼을 눌렀을 때 씁니다. 응답은 바로 보내고, 실제 수집은 뒤에서 계속 진행합니다.
+          // Worker 수동 실행은 Tenant 전체 데이터에 영향을 주므로 관리자 전용입니다.
+          const isAdmin = payload.type === 'owner' ||
+            (payload.type === 'staff' && Array.isArray(payload.permissionKeys) && payload.permissionKeys.includes('settings.manage'));
+          if (!isAdmin) return sendJson(res, 403, { error: '레퍼런스 수집 실행은 관리자 전용입니다.' });
           runReferenceWorkerCycle().catch(error => console.error('[레퍼런스 수집 Worker] 수동 실행 오류:', error?.message || error));
           return sendJson(res, 200, { ok: true, message: '수집을 시작했습니다. 완료까지 몇 분 정도 걸릴 수 있습니다.' });
         }
@@ -2467,12 +2475,20 @@ const server = http.createServer(async (req, res) => {
           if (reqRow?.status === 'processing' && !isStaleProcessing) {
             return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
           }
-          // 초과 과금 동의 대기 중인 요청입니다. confirmOverage=true가 포함됐으면 즉시 재개합니다.
-          // confirmOverage 없이 도착하면 사용자에게 동의 필요 상태임을 다시 알립니다.
-          if (reqRow?.status === 'awaiting_overage') {
-            if (!brief.confirmOverage) {
-              return sendJson(res, 409, { error: '초과 과금 동의가 필요합니다. 동의 후 같은 키로 confirmOverage: true를 포함해 재요청하세요.', code: 'overage_confirm_required' });
-            }
+          if (reqRow?.status === 'awaiting_overage' && !brief.confirmOverage) {
+            return sendJson(res, 409, { error: '초과 과금 동의가 필요합니다. 동의 후 같은 키로 confirmOverage: true를 포함해 재요청하세요.', code: 'overage_confirm_required' });
+          }
+
+          let genResult;
+          // awaiting_overage 상태에서 confirmOverage=true로 재개하면 이미 processing으로
+          // 전환했으므로 INSERT lockResult 블록을 건너뜁니다.
+          let alreadyLocked = false;
+          if (reqRow?.status === 'ai_completed') {
+            // AI는 이미 과거 요청에서 성공했으므로, HOWTOM 자체 한도도 지금 확정합니다.
+            genResult = sanitizeDeep({ ...reqRow.result, billing: reqRow.billing });
+            await confirmUsageReservation(blogUsageReservation.event?.id);
+            alreadyLocked = true; // 처리권 확보 불필요, INSERT 블록 건너뜀
+          } else if (reqRow?.status === 'awaiting_overage' && brief.confirmOverage) {
             // confirmOverage=true → processing으로 전환해 즉시 재개합니다(중복 실행 방지).
             await pgPool.query(
               `UPDATE blog_generation_requests SET status='processing', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2 AND status='awaiting_overage'`,
@@ -2482,15 +2498,9 @@ const server = http.createServer(async (req, res) => {
             if (recheck.rows[0]?.status !== 'processing') {
               return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
             }
-            // processing 전환 성공 → 아래 외부 API 호출로 진행합니다(insert 블록 건너뜀).
+            alreadyLocked = true; // 처리권 이미 확보 완료 → INSERT 블록 건너뜀
           }
-
-          let genResult;
-          if (reqRow?.status === 'ai_completed') {
-            genResult = sanitizeDeep({ ...reqRow.result, billing: reqRow.billing });
-            // AI는 이미 과거 요청에서 성공했으므로, HOWTOM 자체 한도도 지금 확정합니다.
-            await confirmUsageReservation(blogUsageReservation.event?.id);
-          } else {
+          if (!alreadyLocked) {
             // 외부 호출 전에 먼저 "처리 중" 상태를 원자적으로 등록합니다(UNIQUE 제약이
             // 동시 등록을 막아줍니다) - 같은 키로 동시에 두 요청이 들어와도 AI가 두 번
             // 호출되지 않습니다.
