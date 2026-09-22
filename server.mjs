@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4100);
 const DIST_DIR = path.join(__dirname, 'dist');
+const JWT_SECRET = process.env.JWT_SECRET || '';
 
 // ── 로그인 Rate Limit ────────────────────────────────────────────────────────
 // 동일 IP의 과도한 로그인 시도를 차단합니다(brute-force 방어).
