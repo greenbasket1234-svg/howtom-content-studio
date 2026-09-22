@@ -918,8 +918,14 @@ async function callBlogGenerationProvider(brief) {
           }
           return {
             id: a.assetId,
-            tags: Array.isArray(a.tags) ? a.tags.join(', ') : (a.tags || ''),
-            caption: a.caption || '', // 파일명(a.name) 제외 — 네이버에 그대로 노출됨
+            // caption 텍스트는 AI가 사진 배치를 판단하는 컨텍스트로만 사용합니다.
+            // tags에 합쳐서 AI에 전달하고, 실제 발행 캡션은 빈 값으로 보냅니다.
+            // caption을 채우면 블로그에 독자에게 그 문장이 그대로 노출됩니다.
+            tags: [
+              Array.isArray(a.tags) ? a.tags.join(', ') : (a.tags || ''),
+              a.caption || '',
+            ].filter(Boolean).join(' | '),
+            caption: '', // 발행 캡션은 항상 빈 값 — 사진 설명이 블로그에 그대로 노출되지 않도록
             url,
           };
         })

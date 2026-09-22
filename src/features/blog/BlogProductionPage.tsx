@@ -542,14 +542,14 @@ function AssetModal({advertiserId,assets,imageBlocks,onClose,onAttach,onAdded,on
       <input id="asset-file-input" type="file" accept="image/*" style={{display:'none'}} onChange={e=>pickFile(e.target.files?.[0]||null)}/>
       <input value={name} onChange={e=>setName(e.target.value)} placeholder="사진 이름 (예: 대표메뉴 한우등심)" required/>
       <input value={tags} onChange={e=>setTags(e.target.value)} placeholder="태그: 대표메뉴, 한우, 숯불 (쉼표 구분)"/>
-      <textarea rows={2} value={caption} onChange={e=>setCaption(e.target.value)} placeholder="설명: 숯불에 구운 한우 등심 - AI가 이 설명으로 사진 위치를 판단합니다." style={{resize:'vertical'}}/>
+      <textarea rows={2} value={caption} onChange={e=>setCaption(e.target.value)} placeholder="AI 설명 (블로그 미노출): 숯불에 구운 한우 등심 - AI가 이 내용으로 사진 위치를 판단합니다. 독자에게는 보이지 않습니다." style={{resize:'vertical'}}/>
       {notice&&<p style={{color:notice.includes('완료')?'#16a34a':'#dc2626',fontSize:12,margin:0}}>{notice}</p>}
       <button className="btn primary" disabled={!file||uploading}>{uploading?'업로드 중...':'사진 등록'}</button>
     </form>:<form className="blog26-asset-form" onSubmit={addByUrl}>
       <input value={name} onChange={e=>setName(e.target.value)} placeholder="사진 이름" required/>
       <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="이미지 URL (https://...)" required/>
       <input value={tags} onChange={e=>setTags(e.target.value)} placeholder="태그: 외관, 야경, 간판"/>
-      <textarea rows={2} value={caption} onChange={e=>setCaption(e.target.value)} placeholder="설명: 가게 정면 저녁 전경" style={{resize:'vertical'}}/>
+      <textarea rows={2} value={caption} onChange={e=>setCaption(e.target.value)} placeholder="AI 설명 (블로그 미노출): 가게 정면 저녁 전경 - AI 사진 배치용. 독자에게는 보이지 않습니다." style={{resize:'vertical'}}/>
       {notice&&<p style={{color:notice.includes('완료')?'#16a34a':'#dc2626',fontSize:12,margin:0}}>{notice}</p>}
       <button className="btn primary" disabled={uploading}>{uploading?'등록 중...':'등록'}</button>
     </form>}
