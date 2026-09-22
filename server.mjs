@@ -769,7 +769,7 @@ async function ensureAutopostProSeatsTable() {
   // 이전 버전에서 data:image/... 형태로 저장된 자산을 blog_asset_files BYTEA로
   // 이전하고 blog_assets.url을 /photos/:id.ext 공개 URL로 교체합니다.
   try {
-    const siteUrlForMigration = process.env.SITE_URL || '';
+    const siteUrlForMigration = process.env.SITE_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '');
     const legacyAssets = await pgPool.query(
       `SELECT id, tenant_id, data FROM blog_assets WHERE data->>'url' LIKE 'data:image/%' LIMIT 100`
     );
@@ -893,7 +893,8 @@ async function callBlogGenerationProvider(brief) {
           // 상대경로(/photos/...)는 SITE_URL을 붙여 절대 URL로 변환합니다.
           let url = a.url;
           if (url.startsWith('/')) {
-            const siteUrl = (process.env.SITE_URL || '').replace(/\/$/, '');
+            // SITE_URL 없으면 Railway 자체 도메인 환경변수로 자동 감지합니다.
+            const siteUrl = (process.env.SITE_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')).replace(/\/$/, '');
             url = siteUrl ? `${siteUrl}${url}` : url;
           }
           return {
@@ -2744,8 +2745,9 @@ const server = http.createServer(async (req, res) => {
 
           // 공개 URL: /photos/:id.ext (인증 없이 접근 가능 — 네이버 편집기에서 사용)
           const host = req.headers.host || '';
-          const isSecure = process.env.SITE_URL || host.includes('railway.app') || host.includes('howtom');
-          const baseUrl = process.env.SITE_URL || `${isSecure ? 'https' : 'http'}://${host}`;
+          const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '';
+          const isSecure = process.env.SITE_URL || railwayDomain || host.includes('railway.app') || host.includes('howtom');
+          const baseUrl = (process.env.SITE_URL || railwayDomain || `${isSecure ? 'https' : 'http'}://${host}`).replace(/\/$/, '');
           const publicUrl = `${baseUrl}/photos/${assetId}${ext}`;
 
           const row = {
