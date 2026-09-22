@@ -845,12 +845,19 @@ async function callBlogGenerationProvider(brief) {
       ).catch(() => ({ rows: [] }));
       photosPayload = assetRows.rows
         .map(r => r.data)
-        .filter(a => a && (a.tags?.length || a.caption))
+        .filter(a => {
+          if (!a) return false;
+          // data: URL(base64)은 오토포스트 Pro 400 거부. 공개 https:// URL만 전송합니다.
+          if (!a.url || a.url.startsWith('data:') || !a.url.startsWith('http')) return false;
+          return true;
+        })
         .map(a => ({
           id: a.assetId,
           tags: Array.isArray(a.tags) ? a.tags.join(', ') : (a.tags || ''),
-          caption: a.caption || a.name || '',
-          ...(a.url ? { url: a.url } : {}),
+          // 파일명(a.name)은 캡션으로 쓰지 않습니다. 네이버에 그대로 노출되기 때문입니다.
+          // caption이 없으면 빈 값 → 캡션 없이 사진만 삽입됩니다.
+          caption: a.caption || '',
+          url: a.url,
         }));
     }
 
@@ -858,28 +865,41 @@ async function callBlogGenerationProvider(brief) {
       const reqBody = {
         keyword: brief.primaryKeyword,
         length: mapLengthToAutopostCode(brief.length ?? brief.targetLength),
-        num_images: Number.isFinite(Number(brief.numImages)) ? Number(brief.numImages) : 1,
+        // photos가 있으면 그 수로 자리를 맞춥니다(남는 빈 자리 방지).
+        num_images: photosPayload.length > 0
+          ? photosPayload.length
+          : (Number.isFinite(Number(brief.numImages)) ? Math.max(0, Number(brief.numImages)) : 1),
         confirm_overage: Boolean(brief.confirmOverage),
         ...(photosPayload.length ? { photos: photosPayload } : {}),
       };
       const draft = await autopostProRequest('POST', `/v1/seats/${seatRow.seat_id}/drafts`, reqBody,
         idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined);
 
-      // image_library_pick 처리: AI가 고른 사진 ID 목록을 블록에 매핑합니다.
-      // draft.body의 [사진N] 자리 표시자를 실제 assetId로 교체하고 image 블록을 생성합니다.
       let bodyHtml = draft.body || '';
       const imagePick = Array.isArray(draft.image_library_pick) ? draft.image_library_pick : [];
       const photoMap = new Map(photosPayload.map(p => [String(p.id), p]));
 
-      // [사진N] → assetId/img 태그로 교체
-      bodyHtml = bodyHtml.replace(/\[사진(\d+)\]/g, (_, n) => {
-        const idx = Number(n) - 1;
-        const pickedId = imagePick[idx];
-        if (!pickedId) return ''; // null → 자리 제거
-        const photo = photoMap.get(String(pickedId));
-        if (photo?.url) return `<img src="${photo.url}" alt="${photo.caption || ''}" style="max-width:100%;height:auto;"/>`;
-        return ''; // URL 없으면 제거
-      });
+      if (photosPayload.length > 0) {
+        // photos를 보낸 경우: API가 이미 body에 사진을 삽입합니다.
+        // 남아있는 안내 문구 패턴만 제거합니다.
+        bodyHtml = bodyHtml
+          .replace(/📷\s*사진\d+\s*위치[^<\n]*?(?:\n|<br\s*\/?>|$)/g, '')
+          .replace(/\[사진\d+\]/g, '');
+      } else {
+        // photos 없이 image_library_pick만 있는 경우: 수동으로 교체
+        bodyHtml = bodyHtml.replace(/\[사진(\d+)\]/g, (_, n) => {
+          const idx = Number(n) - 1;
+          const pickedId = imagePick[idx];
+          if (!pickedId) return '';
+          const photo = photoMap.get(String(pickedId));
+          if (photo?.url) return `<img src="${photo.url}" alt="${photo.caption || ''}" style="max-width:100%;height:auto;"/>`;
+          return '';
+        });
+        // 교체 안 된 나머지 안내 문구 제거
+        bodyHtml = bodyHtml
+          .replace(/📷\s*사진\d+\s*위치[^<\n]*?(?:\n|<br\s*\/?>|$)/g, '')
+          .replace(/\[사진\d+\]/g, '');
+      }
 
       return {
         generator: 'autopost-pro',

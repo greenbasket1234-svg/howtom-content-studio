@@ -359,7 +359,7 @@ export function BlogProductionPage(){
           const htmlBlock=project.blocks.find(b=>b.type==='html');
           if(!htmlBlock){setNotice('본문이 없습니다. 먼저 초안을 생성하세요.');return;}
           const html=htmlBlock.text||'';
-          const imgTag=`\n<figure style="margin:16px 0;text-align:center;"><img src="${url}" alt="${name}" style="max-width:100%;height:auto;border-radius:8px;" /><figcaption style="font-size:12px;color:#6b7280;margin-top:6px;">${caption||name}</figcaption></figure>\n`;
+          const imgTag=`\n<figure style="margin:16px 0;text-align:center;"><img src="${url}" alt="${caption||name}" style="max-width:100%;height:auto;border-radius:8px;" />${caption?`<figcaption style="font-size:12px;color:#6b7280;margin-top:6px;">${caption}</figcaption>`:''}</figure>\n`;
           // 1. [사진N] 자리표시자가 있으면 첫 번째 것을 교체합니다.
           const placeholderRe=/\[사진\d+\]|\[photo\d+\]/i;
           if(placeholderRe.test(html)){updateBlock(htmlBlock.blockId,{text:html.replace(placeholderRe,imgTag.trim())});setNotice(`📷 "${name}" — [사진] 자리에 삽입했습니다.`);return;}
