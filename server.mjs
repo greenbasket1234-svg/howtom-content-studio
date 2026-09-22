@@ -764,6 +764,45 @@ async function ensureAutopostProSeatsTable() {
     created_at TIMESTAMPTZ DEFAULT now()
   )`);
   await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_blog_asset_files_tenant ON blog_asset_files(tenant_id)`);
+
+  // ── 기존 blog_assets base64 URL → BYTEA 자동 마이그레이션 ─────────────
+  // 이전 버전에서 data:image/... 형태로 저장된 자산을 blog_asset_files BYTEA로
+  // 이전하고 blog_assets.url을 /photos/:id.ext 공개 URL로 교체합니다.
+  try {
+    const siteUrlForMigration = process.env.SITE_URL || '';
+    const legacyAssets = await pgPool.query(
+      `SELECT id, tenant_id, data FROM blog_assets WHERE data->>'url' LIKE 'data:image/%' LIMIT 100`
+    );
+    for (const row of legacyAssets.rows) {
+      try {
+        const d = row.data || {};
+        const url = d.url || '';
+        const matches = url.match(/^data:(image\/[^;]+);base64,(.+)$/);
+        if (!matches) continue;
+        const mimeType = matches[1];
+        const binary = Buffer.from(matches[2], 'base64');
+        const ext = mimeType.includes('png') ? '.png' : mimeType.includes('gif') ? '.gif' : mimeType.includes('webp') ? '.webp' : '.jpg';
+        const existing = await pgPool.query('SELECT id FROM blog_asset_files WHERE id=$1', [row.id]);
+        if (!existing.rows.length) {
+          await pgPool.query(
+            'INSERT INTO blog_asset_files (id, tenant_id, mime_type, size_bytes, data) VALUES ($1,$2,$3,$4,$5)',
+            [row.id, row.tenant_id, mimeType, binary.length, binary]
+          );
+        }
+        const publicUrl = siteUrlForMigration
+          ? `${siteUrlForMigration}/photos/${row.id}${ext}`
+          : `/photos/${row.id}${ext}`;
+        const updated = { ...d, url: publicUrl };
+        await pgPool.query('UPDATE blog_assets SET data=$1 WHERE id=$2', [JSON.stringify(updated), row.id]);
+        console.log(`[마이그레이션] blog_asset ${row.id} base64→BYTEA 완료 (${Math.round(binary.length/1024)}KB)`);
+      } catch (migErr) {
+        console.error(`[마이그레이션] blog_asset ${row.id} 실패:`, migErr?.message);
+      }
+    }
+    if (legacyAssets.rows.length > 0) console.log(`[마이그레이션] blog_assets ${legacyAssets.rows.length}건 처리`);
+  } catch (migrationErr) {
+    console.error('[마이그레이션] blog_assets 건너뜀:', migrationErr?.message);
+  }
   // 광고·문서·영상 generate 결과 캐싱 - replayed 시 AI 재호출 없이 결과 반환
   await pgPool.query(`ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS result JSONB`);
   // 같은 tenant_id 안에서도 idempotency_key는 항상 유일해야 안전합니다(이미 UNIQUE지만,
@@ -846,19 +885,26 @@ async function callBlogGenerationProvider(brief) {
       photosPayload = assetRows.rows
         .map(r => r.data)
         .filter(a => {
-          if (!a) return false;
-          // data: URL(base64)은 오토포스트 Pro 400 거부. 공개 https:// URL만 전송합니다.
-          if (!a.url || a.url.startsWith('data:') || !a.url.startsWith('http')) return false;
+          if (!a?.url) return false;
+          if (a.url.startsWith('data:')) return false; // base64: API 거부(400)
           return true;
         })
-        .map(a => ({
-          id: a.assetId,
-          tags: Array.isArray(a.tags) ? a.tags.join(', ') : (a.tags || ''),
-          // 파일명(a.name)은 캡션으로 쓰지 않습니다. 네이버에 그대로 노출되기 때문입니다.
-          // caption이 없으면 빈 값 → 캡션 없이 사진만 삽입됩니다.
-          caption: a.caption || '',
-          url: a.url,
-        }));
+        .map(a => {
+          // 상대경로(/photos/...)는 SITE_URL을 붙여 절대 URL로 변환합니다.
+          let url = a.url;
+          if (url.startsWith('/')) {
+            const siteUrl = (process.env.SITE_URL || '').replace(/\/$/, '');
+            url = siteUrl ? `${siteUrl}${url}` : url;
+          }
+          return {
+            id: a.assetId,
+            tags: Array.isArray(a.tags) ? a.tags.join(', ') : (a.tags || ''),
+            caption: a.caption || '', // 파일명(a.name) 제외 — 네이버에 그대로 노출됨
+            url,
+          };
+        })
+        // 절대 URL만 전송합니다(상대 URL은 SITE_URL 미설정 시 그대로 남음).
+        .filter(p => p.url.startsWith('http'));
     }
 
     try {
@@ -883,8 +929,10 @@ async function callBlogGenerationProvider(brief) {
         // photos를 보낸 경우: API가 이미 body에 사진을 삽입합니다.
         // 남아있는 안내 문구 패턴만 제거합니다.
         bodyHtml = bodyHtml
-          .replace(/📷\s*사진\d+\s*위치[^<\n]*?(?:\n|<br\s*\/?>|$)/g, '')
-          .replace(/\[사진\d+\]/g, '');
+          .replace(/<[pP][^>]*>\s*📷[^<]*<\/[pP]>/g, '') // <p>📷 사진N...</p>
+          .replace(/<[^>]*>📷[^<]*사진\d+[^<]*<\/[^>]*>/g, '') // 기타 태그 감싸진 형태
+          .replace(/📷[^\n<]*/g, '') // 인라인 형태
+          .replace(/\[사진\d+\]/g, ''); // [사진N] 형태
       } else {
         // photos 없이 image_library_pick만 있는 경우: 수동으로 교체
         bodyHtml = bodyHtml.replace(/\[사진(\d+)\]/g, (_, n) => {
@@ -897,8 +945,10 @@ async function callBlogGenerationProvider(brief) {
         });
         // 교체 안 된 나머지 안내 문구 제거
         bodyHtml = bodyHtml
-          .replace(/📷\s*사진\d+\s*위치[^<\n]*?(?:\n|<br\s*\/?>|$)/g, '')
-          .replace(/\[사진\d+\]/g, '');
+          .replace(/<[pP][^>]*>\s*📷[^<]*<\/[pP]>/g, '') // <p>📷 사진N...</p>
+          .replace(/<[^>]*>📷[^<]*사진\d+[^<]*<\/[^>]*>/g, '') // 기타 태그 감싸진 형태
+          .replace(/📷[^\n<]*/g, '') // 인라인 형태
+          .replace(/\[사진\d+\]/g, ''); // [사진N] 형태
       }
 
       return {
