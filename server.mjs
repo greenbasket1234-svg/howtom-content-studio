@@ -1052,9 +1052,16 @@ function sendJson(res, status, body) {
 async function readJson(req) {
   return await new Promise((resolve, reject) => {
     let raw = '';
+    let aborted = false;
     req.on('data', chunk => {
+      if (aborted) return; // 이미 한도 초과 → 추가 청크 무시
       raw += chunk;
-      if (raw.length > 1024 * 1024) reject(new Error('요청 본문이 너무 큽니다.'));
+      if (raw.length > 1024 * 1024) {
+        aborted = true;
+        raw = ''; // 메모리 즉시 해제
+        req.destroy(); // 소켓 종료로 추가 수신 차단
+        reject(new Error('요청 본문이 너무 큽니다.'));
+      }
     });
     req.on('end', () => {
       if (!raw) return resolve({});
@@ -1363,6 +1370,15 @@ function ctxCanAccessAdvertiser(ctx, advertiserId) {
   if (ctx.advertiserIds === null) return true;
   return ctx.advertiserIds.includes(advertiserId);
 }
+
+// ── ID 기반 개별 객체 권한 검사 헬퍼 ──────────────────────────────────────────
+async function assertCanAccessRef(pgPool, tenantId, payload, refId, table='content_references') {
+  const r = await pgPool.query(`SELECT advertiser_id::text as aid FROM ${table} WHERE tenant_id=$1 AND id=$2`, [tenantId, refId]);
+  if (!r.rows[0]) return '404';
+  if (!ctxCanAccessAdvertiser(payload, r.rows[0].aid)) return '403';
+  return null;
+}
+
 function requireDb(res) {
   if (!pgPool) {
     sendJson(res, 503, { error: 'DATABASE_URL이 설정되지 않아 데이터베이스 기능을 사용할 수 없습니다.' });
@@ -2034,6 +2050,9 @@ const server = http.createServer(async (req, res) => {
         const refMatch = pathname.match(/^\/api\/references\/([^/]+)$/);
         if (refMatch && req.method === 'PATCH') {
           const id = decodeURIComponent(refMatch[1]);
+          const chk1 = await assertCanAccessRef(pgPool, tenantId, payload, id);
+          if (chk1 === '404') return sendJson(res, 404, { error: '찾을 수 없습니다.' });
+          if (chk1 === '403') return sendJson(res, 403, { error: '이 레퍼런스에 접근할 권한이 없습니다.' });
           const body = await readJson(req);
           const sets = []; const params = [tenantId, id];
           if (body.memo !== undefined) { params.push(cleanText(body.memo, 1000)); sets.push(`memo=$${params.length}`); }
@@ -2044,6 +2063,9 @@ const server = http.createServer(async (req, res) => {
         }
         if (refMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(refMatch[1]);
+          const chk2 = await assertCanAccessRef(pgPool, tenantId, payload, id);
+          if (chk2 === '404') return sendJson(res, 404, { error: '찾을 수 없습니다.' });
+          if (chk2 === '403') return sendJson(res, 403, { error: '이 레퍼런스에 접근할 권한이 없습니다.' });
           await pgPool.query(`DELETE FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -2053,6 +2075,9 @@ const server = http.createServer(async (req, res) => {
         if (refAnalyzeMatch && req.method === 'POST') {
           if (!aiConfigured()) return sendJson(res, 400, { error: 'AI가 연결되지 않았습니다. 관리자가 AI_PROVIDER/AI_API_KEY를 설정해야 합니다.' });
           const id = decodeURIComponent(refAnalyzeMatch[1]);
+          const chkAI = await assertCanAccessRef(pgPool, tenantId, payload, id);
+          if (chkAI === '404') return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          if (chkAI === '403') return sendJson(res, 403, { error: '이 레퍼런스에 접근할 권한이 없습니다.' });
           const cur = await pgPool.query(`SELECT * FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           const ref = cur.rows[0];
           if (!ref) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
@@ -2099,6 +2124,9 @@ const server = http.createServer(async (req, res) => {
         const boardMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)$/);
         if (boardMatch && req.method === 'PATCH') {
           const id = decodeURIComponent(boardMatch[1]);
+          const chkB = await assertCanAccessRef(pgPool, tenantId, payload, id, 'reference_boards');
+          if (chkB === '404') return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (chkB === '403') return sendJson(res, 403, { error: '이 보드에 접근할 권한이 없습니다.' });
           const body = await readJson(req);
           const name = cleanText(body.name, 120);
           if (!name) return sendJson(res, 400, { error: '보드 이름을 입력하세요.' });
@@ -2115,6 +2143,11 @@ const server = http.createServer(async (req, res) => {
         }
         const boardDetailMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
         if (boardDetailMatch && req.method === 'GET') {
+          const boardId = decodeURIComponent(boardDetailMatch[1]);
+          // 보드 소유 광고주 확인
+          const chkBD = await assertCanAccessRef(pgPool, tenantId, payload, boardId, 'reference_boards');
+          if (chkBD === '404') return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (chkBD === '403') return sendJson(res, 403, { error: '이 보드에 접근할 권한이 없습니다.' });
           const r = await pgPool.query(
             `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
                     r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
@@ -2124,21 +2157,32 @@ const server = http.createServer(async (req, res) => {
              JOIN content_references r ON r.id = bi.reference_id
              LEFT JOIN advertisers a ON a.id = r.advertiser_id
              WHERE bi.board_id=$1 AND r.tenant_id=$2 ORDER BY bi.added_at DESC`,
-            [decodeURIComponent(boardDetailMatch[1]), tenantId]
+            [boardId, tenantId]
           );
           return sendJson(res, 200, r.rows.map(row => ({ ...row, boards: [] })));
         }
         const boardItemMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
         if (boardItemMatch && req.method === 'POST') {
+          const boardId = decodeURIComponent(boardItemMatch[1]);
+          const chkBI = await assertCanAccessRef(pgPool, tenantId, payload, boardId, 'reference_boards');
+          if (chkBI === '404') return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (chkBI === '403') return sendJson(res, 403, { error: '이 보드에 접근할 권한이 없습니다.' });
           const body = await readJson(req);
           const referenceId = cleanText(body.referenceId || '', 120);
           if (!referenceId) return sendJson(res, 400, { error: 'referenceId가 필요합니다.' });
-          await pgPool.query(`INSERT INTO reference_board_items (board_id, reference_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [decodeURIComponent(boardItemMatch[1]), referenceId]);
+          // 추가하려는 레퍼런스도 같은 테넌트 소속인지 확인합니다.
+          const refCheck = await pgPool.query(`SELECT id FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, referenceId]);
+          if (!refCheck.rows[0]) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          await pgPool.query(`INSERT INTO reference_board_items (board_id, reference_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [boardId, referenceId]);
           return sendJson(res, 200, { ok: true });
         }
         const boardItemRemoveMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items\/([^/]+)$/);
         if (boardItemRemoveMatch && req.method === 'DELETE') {
-          await pgPool.query(`DELETE FROM reference_board_items WHERE board_id=$1 AND reference_id=$2`, [decodeURIComponent(boardItemRemoveMatch[1]), decodeURIComponent(boardItemRemoveMatch[2])]);
+          const boardId = decodeURIComponent(boardItemRemoveMatch[1]);
+          const chkBR = await assertCanAccessRef(pgPool, tenantId, payload, boardId, 'reference_boards');
+          if (chkBR === '404') return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (chkBR === '403') return sendJson(res, 403, { error: '이 보드에 접근할 권한이 없습니다.' });
+          await pgPool.query(`DELETE FROM reference_board_items WHERE board_id=$1 AND reference_id=$2`, [boardId, decodeURIComponent(boardItemRemoveMatch[2])]);
           return sendJson(res, 200, { ok: true });
         }
 
@@ -2162,13 +2206,19 @@ const server = http.createServer(async (req, res) => {
           if (!brandName || !body.advertiserId) return sendJson(res, 400, { error: '광고주와 경쟁 브랜드명을 입력하세요.' });
           const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
+          // 해당 광고주에 접근 권한 확인
+          if (!ctxCanAccessAdvertiser(payload, body.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const id = makeId('competitor');
           await pgPool.query(`INSERT INTO reference_competitors (id, tenant_id, advertiser_id, brand_name, page_name) VALUES ($1,$2,$3,$4,$5)`, [id, tenantId, advRes.rows[0].id, brandName, cleanText(body.pageName || '', 200) || null]);
           return sendJson(res, 201, { id, brandName });
         }
         const competitorMatch = pathname.match(/^\/api\/reference-competitors\/([^/]+)$/);
         if (competitorMatch && req.method === 'DELETE') {
-          await pgPool.query(`DELETE FROM reference_competitors WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(competitorMatch[1])]);
+          const compId = decodeURIComponent(competitorMatch[1]);
+          const chkC = await assertCanAccessRef(pgPool, tenantId, payload, compId, 'reference_competitors');
+          if (chkC === '404') return sendJson(res, 404, { error: '찾을 수 없습니다.' });
+          if (chkC === '403') return sendJson(res, 403, { error: '이 경쟁사에 접근할 권한이 없습니다.' });
+          await pgPool.query(`DELETE FROM reference_competitors WHERE tenant_id=$1 AND id=$2`, [tenantId, compId]);
           return sendJson(res, 200, { ok: true });
         }
       }
@@ -2494,18 +2544,42 @@ const server = http.createServer(async (req, res) => {
             // AI는 이미 과거 요청에서 성공했으므로, HOWTOM 자체 한도도 지금 확정합니다.
             genResult = sanitizeDeep({ ...reqRow.result, billing: reqRow.billing });
             await confirmUsageReservation(blogUsageReservation.event?.id);
-            alreadyLocked = true; // 처리권 확보 불필요, INSERT 블록 건너뜀
+            alreadyLocked = true; // ai_completed: 처리권·AI 호출 모두 불필요
           } else if (reqRow?.status === 'awaiting_overage' && brief.confirmOverage) {
-            // confirmOverage=true → processing으로 전환해 즉시 재개합니다(중복 실행 방지).
-            await pgPool.query(
-              `UPDATE blog_generation_requests SET status='processing', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2 AND status='awaiting_overage'`,
+            // RETURNING으로 실제 이 요청이 처리권을 획득했는지 원자적으로 확인합니다.
+            const overageLock = await pgPool.query(
+              `UPDATE blog_generation_requests SET status='processing', updated_at=now()
+               WHERE tenant_id=$1 AND idempotency_key=$2 AND status='awaiting_overage'
+               RETURNING idempotency_key`,
               [tenantId, idempotencyKey]
             );
-            const recheck = await pgPool.query('SELECT status FROM blog_generation_requests WHERE tenant_id=$1 AND idempotency_key=$2', [tenantId, idempotencyKey]);
-            if (recheck.rows[0]?.status !== 'processing') {
+            if (overageLock.rows.length === 0) {
               return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
             }
-            alreadyLocked = true; // 처리권 이미 확보 완료 → INSERT 블록 건너뜀
+            // 처리권 확보 완료 → INSERT 블록 건너뜀. AI 호출은 아래에서 별도로 합니다.
+            alreadyLocked = true;
+          }
+
+          // awaiting_overage→processing 전환 후: genResult가 없으면 AI 호출이 필요합니다.
+          // alreadyLocked이어도 genResult가 없으면 실제 생성을 수행합니다.
+          if (alreadyLocked && !genResult) {
+            try {
+              genResult = sanitizeDeep(await callBlogGenerationProvider({ ...brief }));
+              await pgPool.query(
+                `UPDATE blog_generation_requests SET status='ai_completed', billing=$2, result=$3, provider_draft_id=$4, updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$5`,
+                [tenantId, JSON.stringify(genResult.billing || null), JSON.stringify(genResult), genResult.providerDraftId || null, idempotencyKey]
+              );
+              await confirmUsageReservation(blogUsageReservation.event?.id);
+            } catch (error) {
+              if (error?.code === 'overage_confirm_required') {
+                await pgPool.query(`UPDATE blog_generation_requests SET status='awaiting_overage', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
+              } else {
+                await pgPool.query(`UPDATE blog_generation_requests SET status='failed', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
+                await refundUsageReservation(blogUsageReservation.event?.id);
+              }
+              const status = error?.code === 'overage_confirm_required' ? 409 : (error?.status || 502);
+              return sendJson(res, status, { error: error instanceof Error ? error.message : 'AI 원고 생성에 실패했습니다.', code: error?.code });
+            }
           }
           if (!alreadyLocked) {
             // 외부 호출 전에 먼저 "처리 중" 상태를 원자적으로 등록합니다(UNIQUE 제약이

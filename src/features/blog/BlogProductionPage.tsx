@@ -315,19 +315,10 @@ export function BlogProductionPage(){
           <label><input type="checkbox" checked={project.options.photos} onChange={e=>patchLocal({options:{...project.options,photos:e.target.checked}})}/> 사진 추천 포함</label>
           <label><input type="checkbox" checked={project.options.compliance} onChange={e=>patchLocal({options:{...project.options,compliance:e.target.checked}})}/> 업종별 규정 검수{aiStatus?.provider==='autopost-pro'?' (오토포스트 Pro 실제 검수)':' (HOWTOM 사전점검만, 오토포스트 미연결)'}</label>
           {project.options.compliance&&aiStatus?.provider==='autopost-pro'&&<button type="button" className="btn secondary mini" style={{marginLeft:22,marginTop:-6}} onClick={()=>void runAutopostCompliance()} disabled={complianceChecking||!project.blocks.length}>{complianceChecking?'검수 중...':'오토포스트 규정검수 실행'}</button>}
-          {autopostCompliance&&(()=>{
-            // 규정검수 이후 본문이 바뀌었는지 contentHash로 확인합니다.
-            const storedHash=autopostCompliance.contentHash;
-            let isStale=false;
-            if(storedHash&&project.blocks!=null){
-              try{const cur=btoa(encodeURIComponent(JSON.stringify({blocks:project.blocks,t:project.selectedTitle}))).slice(0,16);isStale=storedHash.slice(0,16)!==cur;}catch{/* 비교 불가시 경고 없이 통과 */}
-            }
-            return <div className={`blog26-compliance-result ${autopostCompliance.passed?'pass':'fail'}`}>
-              {isStale&&<div style={{background:'#fef3c7',color:'#92400e',borderRadius:6,padding:'6px 10px',fontSize:12,marginBottom:8}}>⚠ 본문이 수정됐습니다. 현재 내용으로 다시 검수해주세요.</div>}
-              {autopostCompliance.passed?'✓ 통과':`⚠ ${autopostCompliance.issues.length}건 확인`}
-              {autopostCompliance.issues.map((i,idx)=><div key={idx} className="blog26-compliance-issue"><b>{i.label}</b><span>{i.guide}</span><small>{i.law}</small></div>)}
-            </div>;
-          })()}
+          {autopostCompliance&&<div className={`blog26-compliance-result ${autopostCompliance.passed?'pass':'fail'}`}>
+            {autopostCompliance.passed?'✓ 통과':`⚠ ${autopostCompliance.issues.length}건 확인`}
+            {autopostCompliance.issues.map((i,idx)=><div key={idx} className="blog26-compliance-issue"><b>{i.label}</b><span>{i.guide}</span><small>{i.law}</small></div>)}
+          </div>}
           <label><input type="checkbox" checked={project.options.seo} onChange={e=>patchLocal({options:{...project.options,seo:e.target.checked}})}/> SEO 사전점검</label>
           {medical&&<label className="medical"><input type="checkbox" checked={project.options.medical} onChange={e=>patchLocal({options:{...project.options,medical:e.target.checked}})}/> 의료광고 사전점검</label>}
         </div>
