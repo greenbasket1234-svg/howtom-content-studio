@@ -39,11 +39,9 @@ export function Layout({ children }: { children: ReactNode }) {
   const { advertisers, selectedId, setSelectedId, loading, isAdvertiserAccount, selected } = useAdvertiserContext();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const navigate = useNavigate();
-  // 광고주 계정은 CONTENT PRO 구독으로 블로그 제작만 이용할 수 있으므로, 여러
-  // 광고주를 관리하는 내부 직원용 메뉴(레퍼런스·광고 제작·자산·관리 등)는 전부
-  // 감추고 "블로그 제작" 하나만 보여줍니다.
+  // 광고주 계정은 '관리' 그룹(내부 운영 메뉴)만 제외하고 나머지는 모두 표시합니다.
   const navGroups = user?.isAdvertiserAccount
-    ? [{ label: '', items: [{ to: '/production/blog', label: '블로그 제작' }] }]
+    ? NAV_GROUPS.filter(g => g.label !== '관리')
     : NAV_GROUPS;
 
   const nav = (
