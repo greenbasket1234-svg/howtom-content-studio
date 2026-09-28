@@ -8,6 +8,7 @@ import {
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertisers } from '../../hooks/useAdvertisers';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
+import { useAuth } from '../../context/AuthContext';
 import { blogApi, OverageConfirmRequiredError } from './blogApi';
 import { analyzeBlogSeo } from './blogSeoEngine';
 import { analyzeCompliance, isMedicalIndustry } from './complianceEngine';
@@ -315,10 +316,19 @@ export function BlogProductionPage(){
           <label><input type="checkbox" checked={project.options.photos} onChange={e=>patchLocal({options:{...project.options,photos:e.target.checked}})}/> 사진 추천 포함</label>
           <label><input type="checkbox" checked={project.options.compliance} onChange={e=>patchLocal({options:{...project.options,compliance:e.target.checked}})}/> 업종별 규정 검수{aiStatus?.provider==='autopost-pro'?' (오토포스트 Pro 실제 검수)':' (HOWTOM 사전점검만, 오토포스트 미연결)'}</label>
           {project.options.compliance&&aiStatus?.provider==='autopost-pro'&&<button type="button" className="btn secondary mini" style={{marginLeft:22,marginTop:-6}} onClick={()=>void runAutopostCompliance()} disabled={complianceChecking||!project.blocks.length}>{complianceChecking?'검수 중...':'오토포스트 규정검수 실행'}</button>}
-          {autopostCompliance&&<div className={`blog26-compliance-result ${autopostCompliance.passed?'pass':'fail'}`}>
-            {autopostCompliance.passed?'✓ 통과':`⚠ ${autopostCompliance.issues.length}건 확인`}
-            {autopostCompliance.issues.map((i,idx)=><div key={idx} className="blog26-compliance-issue"><b>{i.label}</b><span>{i.guide}</span><small>{i.law}</small></div>)}
-          </div>}
+          {autopostCompliance&&(()=>{
+            // 규정검수 이후 본문이 바뀌었는지 contentHash로 확인합니다.
+            const storedHash=autopostCompliance.contentHash;
+            let isStale=false;
+            if(storedHash&&project.blocks!=null){
+              try{const cur=btoa(encodeURIComponent(JSON.stringify({blocks:project.blocks,t:project.selectedTitle}))).slice(0,16);isStale=storedHash.slice(0,16)!==cur;}catch{/* 비교 불가시 경고 없이 통과 */}
+            }
+            return <div className={`blog26-compliance-result ${autopostCompliance.passed?'pass':'fail'}`}>
+              {isStale&&<div style={{background:'#fef3c7',color:'#92400e',borderRadius:6,padding:'6px 10px',fontSize:12,marginBottom:8}}>⚠ 본문이 수정됐습니다. 현재 내용으로 다시 검수해주세요.</div>}
+              {autopostCompliance.passed?'✓ 통과':`⚠ ${autopostCompliance.issues.length}건 확인`}
+              {autopostCompliance.issues.map((i,idx)=><div key={idx} className="blog26-compliance-issue"><b>{i.label}</b><span>{i.guide}</span><small>{i.law}</small></div>)}
+            </div>;
+          })()}
           <label><input type="checkbox" checked={project.options.seo} onChange={e=>patchLocal({options:{...project.options,seo:e.target.checked}})}/> SEO 사전점검</label>
           {medical&&<label className="medical"><input type="checkbox" checked={project.options.medical} onChange={e=>patchLocal({options:{...project.options,medical:e.target.checked}})}/> 의료광고 사전점검</label>}
         </div>
@@ -398,6 +408,8 @@ function AutopostProStatusBanner({aiStatus}:{aiStatus:{configured:boolean;provid
   </div>;
 }
 function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setSelectedAdvertiser,query,setQuery,onCreate,onOpen,onDelete,notice,aiStatus}:{advertisers:ReturnType<typeof useAdvertisers>[0];projects:BlogProject[];allProjects:BlogProject[];selectedAdvertiser:string;setSelectedAdvertiser:(v:string)=>void;query:string;setQuery:(v:string)=>void;onCreate:()=>void;onOpen:(id:string)=>void;onDelete:(id:string)=>void;notice:string;aiStatus:{configured:boolean;provider:string|null}|null}){
+  const {user} = useAuth();
+  const isAdvertiserAccount = Boolean(user?.isAdvertiserAccount);
   const now=new Date();
   const scopedProjects=selectedAdvertiser?allProjects.filter(p=>p.advertiserId===selectedAdvertiser):allProjects;
   const counts={
@@ -410,7 +422,9 @@ function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setS
   return <div className="blog26-page"><PageHeader title="블로그 제작" description="광고주별 콘텐츠 제작부터 SEO·업종별 규정 검수·의료광고 심의 관리까지 한곳에서 진행합니다." action={<button className="btn primary" onClick={onCreate} disabled={!advertisers.length}><Plus size={15}/> 새 블로그 제작</button>}/><AutopostProStatusBanner aiStatus={aiStatus}/>{notice&&<div className="blog26-notice">{notice}</div>}
     {!advertisers.length?<section className="card blog26-zero"><Sparkles size={36}/><h2>아직 등록된 광고주가 없습니다.</h2><p>HOWTOM 유니버스는 샘플 데이터 없이 시작합니다. 광고주를 먼저 등록하면 블로그 제작 워크스페이스를 사용할 수 있습니다.</p><a className="btn primary" href={`${import.meta.env.VITE_UNIVERSE_URL || 'http://localhost:3000'}/advertisers`}><Plus size={15}/> 유니버스에서 광고주 등록</a></section>:<>
     <section className="blog26-kpis">{[['이번 달 제작',counts.month],['작성 중',counts.writing],['검토 필요',counts.review],['발행 완료',counts.published],['규정 경고',counts.warnings]].map(([label,value])=><article className="card" key={String(label)}><span>{label}</span><b>{value}</b></article>)}</section>
-    <section className="card blog26-dashboard-toolbar"><div className="blog26-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="제목·키워드 검색"/></div><select value={selectedAdvertiser} onChange={e=>setSelectedAdvertiser(e.target.value)}><option value="">전체 광고주</option>{advertisers.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select><button className="btn primary" onClick={onCreate} disabled={!selectedAdvertiser}><Plus size={15}/> 새 글</button></section>
+    <section className="card blog26-dashboard-toolbar"><div className="blog26-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="제목·키워드 검색"/></div>{isAdvertiserAccount
+          ? <span className="blog26-adv-locked">{advertisers.find(a=>a.id===selectedAdvertiser)?.name||''}</span>
+          : <select value={selectedAdvertiser} onChange={e=>setSelectedAdvertiser(e.target.value)}><option value="">전체 광고주</option>{advertisers.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select>}<button className="btn primary" onClick={onCreate} disabled={!selectedAdvertiser}><Plus size={15}/> 새 글</button></section>
     <section className="card blog26-project-table"><div className="blog26-panel-title"><div><h3>저장한 글</h3><small>서버에 저장된 블로그 프로젝트</small></div></div>{projects.length?<div className="table-scroll"><table><thead><tr><th>제목</th><th>광고주</th><th>업종</th><th>키워드</th><th>검수</th><th>상태</th><th>수정일</th><th/></tr></thead><tbody>{projects.map(p=><tr key={p.projectId}><td><b>{p.selectedTitle||'제목 미정'}</b></td><td>{p.advertiserName}</td><td>{p.industry}</td><td>{p.primaryKeyword||'-'}</td><td><span className={`blog26-pill ${p.complianceIssues?.some(x=>x.severity==='danger')?'danger':p.complianceStatus==='reviewed'?'success':'neutral'}`}>{p.complianceStatus==='reviewed'?'검토완료':p.complianceIssues?.some(x=>x.severity==='danger')?'수정필요':'검토 전'}</span></td><td><span className={`blog26-pill ${statusTone(p.status)}`}>{STATUS_LABEL[p.status]||p.status}</span></td><td>{fmt(p.updatedAt)}</td><td><div className="action-row compact"><button className="btn secondary" onClick={()=>onOpen(p.projectId)}>열기</button><button className="icon-btn danger" title="삭제" onClick={()=>onDelete(p.projectId)}><Trash2 size={14}/></button></div></td></tr>)}</tbody></table></div>:<div className="blog26-list-empty"><FileText size={30}/><b>아직 작성한 글이 없습니다.</b><span>새 블로그 제작을 눌러 첫 콘텐츠를 만들어보세요.</span></div>}</section>
     <section className="blog26-bottom-grid"><article className="card"><div className="blog26-panel-title"><div><h3>콘텐츠 캘린더</h3><small>{selectedAdvertiser?'선택 광고주 · ':''}발행 예정일 우선 · 미설정 시 생성일</small></div><CalendarDays size={18}/></div><BlogCalendar projects={scopedProjects} onOpen={onOpen}/></article><article className="card"><div className="blog26-panel-title"><div><h3>문체·자료</h3><small>광고주별 설정</small></div><Wand2 size={18}/></div><p className="blog26-muted">블로그 글을 연 뒤 광고주 문체 프로필, 선호 표현, 금지 표현, CTA, 참고 원문을 서버에 저장할 수 있습니다.</p><div className="blog26-resource-summary"><span>등록 광고주 <b>{advertisers.length}</b></span><span>현재 범위 콘텐츠 <b>{scopedProjects.length}</b></span><span>의료 심의 관리 <b>{scopedProjects.filter(p=>isMedicalIndustry(p.industry)).length}</b></span></div></article></section></>}</div>;
 }
