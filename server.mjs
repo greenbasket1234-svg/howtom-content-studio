@@ -678,7 +678,10 @@ async function autopostProRequest(method, path, body, extraHeaders, attempt = 0)
 const AUTOPOST_INDUSTRY_MAP = {
   '병원·의료기관': 'medical', '치과': 'medical', '한의원': 'medical',
   '동물병원': 'vet', '세무사·세무법인': 'tax', '학원·교육': 'academy',
+  '이삿짐센터': 'moving', '이사업체': 'moving', '이사': 'moving', '포장이사': 'moving',
 };
+// 지원 업종 목록 (의료·수의·세무·학원·음식·쇼핑·이사)
+const SUPPORTED_INDUSTRIES = ['medical', 'tax', 'academy', 'vet', 'restaurant', 'shop', 'moving'];
 function mapIndustryToAutopostCode(advertiser) {
   if (advertiser.autopost_pro_industry) return advertiser.autopost_pro_industry;
   return AUTOPOST_INDUSTRY_MAP[advertiser.industry || ''] || advertiser.industry || '';
@@ -728,7 +731,7 @@ function mapLengthToAutopostCode(input) {
 function isAutopostSupportedAdvertiser(advertiser) {
   if (!advertiser) return false;
   const industryCode = mapIndustryToAutopostCode(advertiser);
-  return ['medical', 'tax', 'academy', 'vet'].includes(industryCode);
+  return SUPPORTED_INDUSTRIES.includes(industryCode);
 }
 
 async function ensureAutopostProSeatsTable() {
@@ -857,7 +860,7 @@ async function ensureAutopostProSeat(tenantId, advertiser) {
   if (!advertiser.business_reg_no) { const e = new Error('이 광고주는 사업자등록번호가 등록되어 있지 않습니다. HOWTOM Universe의 광고주 정보에서 먼저 입력하세요.'); e.status = 400; throw e; }
   if (!advertiser.industry) { const e = new Error('이 광고주는 업종이 등록되어 있지 않습니다.'); e.status = 400; throw e; }
   const industryCode = mapIndustryToAutopostCode(advertiser);
-  if (!['medical', 'tax', 'academy', 'vet'].includes(industryCode)) {
+  if (!SUPPORTED_INDUSTRIES.includes(industryCode)) {
     const e = new Error(`'${advertiser.industry}' 업종은 아직 오토포스트 Pro에 등록되지 않았습니다. 제휴사에 업종 추가를 요청한 뒤, 광고주 정보의 '오토포스트 Pro 업종 코드'에 안내받은 코드를 입력하세요.`);
     e.status = 400; throw e;
   }
@@ -940,7 +943,9 @@ async function callBlogGenerationProvider(brief) {
         // photos가 있으면 그 수로 자리를 맞춥니다(남는 빈 자리 방지).
         num_images: photosPayload.length > 0
           ? photosPayload.length
-          : (Number.isFinite(Number(brief.numImages)) ? Math.max(0, Number(brief.numImages)) : 1),
+          : (Number.isFinite(Number(brief.numImages))
+              ? Math.max(0, Number(brief.numImages))
+              : (mapIndustryToAutopostCode(advertiser) === 'moving' ? 5 : 1)),  // 이사 업종은 기본 5장
         confirm_overage: Boolean(brief.confirmOverage),
         ...(photosPayload.length ? { photos: photosPayload } : {}),
       };
@@ -1247,10 +1252,12 @@ function verifyUserPassword(password, stored) {
 // 구독 상품명으로 등급을 판정합니다. HOWTOM Universe의 판정 로직과 정확히 동일해야
 // 합니다 - 다르면 같은 광고주인데 두 앱에서 등급이 다르게 보이는 혼란이 생깁니다.
 function portalTierFromPlanName(planName) {
-  const upper = (planName || '').toUpperCase();
-  if (upper.includes('CONTENT PRO')) return 3;
-  if (upper.includes('INSIGHT')) return 2;
-  if (upper.includes('VIEW')) return 1;
+  const upper = (planName || '').toUpperCase().replace(/[-_]/g, ' ');
+  // 영문·한국어·다양한 표기 모두 인식합니다.
+  if (upper.includes('CONTENT PRO') || upper.includes('CONTENT') ||
+      (planName || '').includes('콘텐츠') || (planName || '').includes('CONTENT')) return 3;
+  if (upper.includes('INSIGHT') || (planName || '').includes('인사이트')) return 2;
+  if (upper.includes('VIEW') || (planName || '').includes('뷰')) return 1;
   return 0;
 }
 /**
@@ -1457,9 +1464,41 @@ const server = http.createServer(async (req, res) => {
         const token = signToken({ email, name: ADMIN_NAME, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
         return sendJson(res, 200, { token, user: { email, name: ADMIN_NAME } });
       }
-      // 2) HOWTOM Universe에서 발급한 광고주 계정 로그인(같은 DB의 app_users 재사용)
+      // 2) 광고주 포털 계정 로그인 (is_advertiser_account=true)
       const account = await resolveAdvertiserAccount(email);
       if (!account) {
+        // 3) 일반 팀원 계정 로그인 (Universe app_users, is_advertiser_account=false)
+        // 담당 광고주의 구독이 CONTENT PRO이면 Content Studio 이용 가능합니다.
+        if (pgPool) {
+          const staffRes = await pgPool.query(
+            `SELECT u.id, u.email, u.name, u.password_hash, u.status, m.advertiser_ids
+             FROM app_users u LEFT JOIN app_memberships m ON m.user_id = u.id
+             WHERE u.email = $1 AND u.is_advertiser_account = false AND u.status = 'active'`,
+            [email]
+          );
+          const staff = staffRes.rows[0];
+          if (staff && staff.password_hash && verifyUserPassword(password, staff.password_hash)) {
+            // 담당 광고주 중 하나라도 Content Pro 구독이면 허용합니다.
+            const advIds = staff.advertiser_ids || [];
+            let staffTier = 0;
+            for (const advId of advIds) {
+              const subRow = await pgPool.query(
+                `SELECT plan_name FROM advertiser_subscriptions WHERE advertiser_id::text = $1 ORDER BY updated_at DESC LIMIT 1`,
+                [advId]
+              );
+              const t = portalTierFromPlanName(subRow.rows[0]?.plan_name || '');
+              if (t > staffTier) staffTier = t;
+            }
+            // advertiser_ids가 없는 팀원(전체 광고주 담당)은 tier=3으로 허용합니다.
+            if (advIds.length === 0) staffTier = 3;
+            console.log(`[Studio 로그인] 팀원 계정 ${email} | tier=${staffTier}`);
+            if (staffTier < 3) {
+              return sendJson(res, 403, { error: '콘텐츠 제작소는 CONTENT PRO 구독에서 이용할 수 있습니다.' });
+            }
+            const token = signToken({ email, name: staff.name, isAdvertiserAccount: false, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
+            return sendJson(res, 200, { token, user: { email, name: staff.name } });
+          }
+        }
         console.warn('[Studio 로그인] 광고주 계정 없음:', email);
         return sendJson(res, 401, { error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
       }
