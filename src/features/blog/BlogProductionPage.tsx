@@ -286,7 +286,9 @@ export function BlogProductionPage(){
   // "오토포스트 Pro 업종 코드"는 override 전용 필드라, 업종을 나중에 바꿔도 예전 값이
   // 그대로 남아있을 수 있습니다(정확히 이번에 겪으신 문제). medical/tax/academy/vet 4개
   // 코드가 아닌 값이 남아있으면 화면에서 바로 보이게 경고합니다.
-  const overrideLooksStale=Boolean(currentAdvertiser?.autopost_pro_industry)&&!['medical','tax','academy','vet'].includes(currentAdvertiser!.autopost_pro_industry!);
+  // 오토포스트 Pro 지원 업종 7개: 의료·세무·학원·수의·음식·쇼핑·이사
+  const AUTOPOST_SUPPORTED=['medical','tax','academy','vet','restaurant','shop','moving'];
+  const overrideLooksStale=Boolean(currentAdvertiser?.autopost_pro_industry)&&!AUTOPOST_SUPPORTED.includes(currentAdvertiser!.autopost_pro_industry!);
   const autopostIndustrySupported=aiStatus?.provider!=='autopost-pro'||Boolean(advertiserAutopostCode);
   const autopostMissingBizNo=aiStatus?.provider==='autopost-pro'&&!currentAdvertiser?.business_reg_no;
   return <div className="blog26-page">
@@ -332,9 +334,9 @@ export function BlogProductionPage(){
           <label><input type="checkbox" checked={project.options.seo} onChange={e=>patchLocal({options:{...project.options,seo:e.target.checked}})}/> SEO 사전점검</label>
           {medical&&<label className="medical"><input type="checkbox" checked={project.options.medical} onChange={e=>patchLocal({options:{...project.options,medical:e.target.checked}})}/> 의료광고 사전점검</label>}
         </div>
-        {!autopostIndustrySupported&&<div className="blog26-usage-warn" style={{marginBottom:8}}>현재 오토포스트 Pro 블로그 생성이 지원되지 않는 업종입니다. (병원·치과·한의원·동물병원·세무·학원만 지원)</div>}
+        {!autopostIndustrySupported&&<div className="blog26-usage-warn" style={{marginBottom:8}}>현재 오토포스트 Pro 블로그 생성이 지원되지 않는 업종입니다. (병원·치과·한의원·동물병원·세무·학원·이삿짐·이사업체 지원)</div>}
         {autopostIndustrySupported&&autopostMissingBizNo&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이 광고주는 사업자등록번호가 등록되어 있지 않습니다. HOWTOM Universe의 광고주 정보에서 먼저 입력하세요.</div>}
-        {aiStatus?.provider==='autopost-pro'&&overrideLooksStale&&<div className="blog26-usage-warn" style={{marginBottom:8}}>⚠ 이 광고주의 "오토포스트 Pro 업종 코드"에 <b>"{currentAdvertiser?.autopost_pro_industry}"</b>가 들어있어 실제 업종({currentAdvertiser?.industry})과 다르게 이 값이 우선 적용됩니다. medical/tax/academy/vet 중 하나가 아니라면 업종을 바꾸신 뒤 남은 예전 값일 수 있으니, HOWTOM Universe에서 이 필드를 비워두거나 올바른 코드로 수정하세요.</div>}
+        {aiStatus?.provider==='autopost-pro'&&overrideLooksStale&&<div className="blog26-usage-warn" style={{marginBottom:8}}>⚠ 이 광고주의 "오토포스트 Pro 업종 코드"에 <b>"{currentAdvertiser?.autopost_pro_industry}"</b>가 들어있어 실제 업종({currentAdvertiser?.industry})과 다르게 이 값이 우선 적용됩니다. medical/tax/academy/vet/restaurant/shop/moving 중 하나가 아니라면 업종을 바꾸신 뒤 남은 예전 값일 수 있으니, HOWTOM Universe에서 이 필드를 비워두거나 올바른 코드로 수정하세요.</div>}
         {retryReason==='save_failed'&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 생성이 완료됐지만 저장에 실패했습니다(이미 과금됐을 수 있음). 아래 버튼은 재생성하지 않고 저장만 다시 시도합니다. 이미 방금 저장에 성공했다면(화면이 갱신 안 됐을 수 있음) <button type="button" className="btn secondary mini" onClick={()=>void reload()}>새로고침</button>으로 최신 상태를 다시 불러오거나, 이 시도를 포기하고 <button type="button" className="btn secondary mini" onClick={()=>{if(confirm('이 생성 시도를 포기하고 새로 만드시겠어요? 방금 그 초안이 이미 저장됐다면 그대로 남고, 새로 누르면 새로운 생성 1건으로 별도 처리됩니다.')){setPendingIdempotencyKey(null);setRetryReason(null);}}}>취소하고 새로 만들기</button>를 누르세요.</div>}
         {retryReason==='request_uncertain'&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 요청이 네트워크 오류 등으로 결과를 확인하지 못했습니다(생성됐는지 불확실). 아래 버튼을 다시 누르면 같은 시도로 안전하게 재시도합니다(중복 과금되지 않습니다). <button type="button" className="btn secondary mini" onClick={()=>{if(confirm('이 시도를 포기하고 완전히 새로 시작하시겠어요?')){setPendingIdempotencyKey(null);setRetryReason(null);}}}>취소하고 새로 만들기</button></div>}
         <button className="btn primary wide" onClick={()=>void generate()} disabled={project.medicalReview.locked||!aiStatus?.configured||generating||!autopostIndustrySupported||autopostMissingBizNo}>{generating?<>{retryReason==='save_failed'?'저장 재시도 중...':retryReason==='request_uncertain'?'재시도 중...':'생성 중... (잠시만요)'}</>:retryReason==='save_failed'?<><Save size={16}/> 저장만 다시 시도</>:retryReason==='request_uncertain'?<><Sparkles size={16}/> 다시 시도</>:<><Sparkles size={16}/> 초안 만들기</>}</button>
