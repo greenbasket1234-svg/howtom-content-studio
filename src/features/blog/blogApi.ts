@@ -54,6 +54,8 @@ export const blogApi = {
     return res.json();
   },
   deleteAsset: (assetId: string) => apiFetch<{ ok: boolean }>(`/api/blog/assets/${encodeURIComponent(assetId)}`, { method: 'DELETE' }),
+  updateAsset: (assetId: string, patch: { name?: string; tags?: string[]; caption?: string }) =>
+    apiFetch<BlogAsset>(`/api/blog/assets/${encodeURIComponent(assetId)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   // 미완료 생성 복구: 새로고침·장애 후 프로젝트의 진행 중 생성 시도를 조회합니다.
   pendingGeneration: (projectId: string) =>

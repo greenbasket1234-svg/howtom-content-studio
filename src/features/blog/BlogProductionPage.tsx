@@ -370,7 +370,7 @@ export function BlogProductionPage(){
       </main>
 
       <aside className="blog26-side card">
-        <PhotoPanel assets={advertiserAssets} project={project} onAttach={attachAsset} onRegister={()=>setAssetOpen(true)} onDelete={async id=>{await blogApi.deleteAsset(id);setAssets(rows=>rows.filter(r=>r.assetId!==id));}}/>
+        <PhotoPanel assets={advertiserAssets} project={project} onAttach={attachAsset} onRegister={()=>setAssetOpen(true)} onDelete={async id=>{await blogApi.deleteAsset(id);setAssets(rows=>rows.filter(r=>r.assetId!==id));}} onUpdate={async(id,patch)=>{const updated=await blogApi.updateAsset(id,patch);setAssets(rows=>rows.map(r=>r.assetId===id?{...r,...updated}:r));}}/>
       </aside>
 
     </div>
@@ -467,10 +467,19 @@ function CompliancePanel({project,issues,onPatch,onLock,onUnlock}:{project:BlogP
   const medical=isMedicalIndustry(project.industry);
   return <section className="blog26-side-section"><div className="blog26-compliance-summary"><ShieldCheck size={22}/><div><b>업종별 사전점검</b><span>{issues.filter(x=>x.severity==='danger').length}개 위험 · {issues.filter(x=>x.severity==='warning').length}개 주의 · {issues.filter(x=>x.severity==='info').length}개 확인</span></div></div><p className="blog26-muted">법률 자문이나 공식 심의를 대체하지 않는 내부 사전점검입니다.</p><div className="blog26-issue-list">{issues.map(issue=><button key={issue.id} className={`blog26-issue ${issue.severity}`} onClick={()=>issue.blockId&&document.getElementById(`blog-block-${issue.blockId}`)?.scrollIntoView({behavior:'smooth',block:'center'})}><span>{issue.category}</span><b>{issue.phrase}</b><small>{issue.reason}</small><em>{issue.suggestion}</em></button>)}{!issues.length&&<div className="blog26-clean"><Check size={18}/> 현재 규칙에서 감지된 위험 표현이 없습니다.</div>}</div>{medical&&<div className="blog26-medical-box"><h4>의료광고 심의 관리</h4><label>사전심의 대상 여부<select value={project.medicalReview.required===true?'yes':project.medicalReview.required===false?'no':'unknown'} onChange={e=>onPatch({medicalReview:{...project.medicalReview,required:e.target.value==='yes'?true:e.target.value==='no'?false:null,status:e.target.value==='no'?'not-required':'check-needed'}})}><option value="unknown">담당자 확인 필요</option><option value="yes">심의 대상 확인</option><option value="no">심의 불필요 확인</option></select></label><label>심의 상태<select value={project.medicalReview.status} onChange={e=>onPatch({medicalReview:{...project.medicalReview,status:e.target.value as BlogProject['medicalReview']['status']}})}>{Object.entries(REVIEW_LABEL).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label><label>심의필번호<input value={project.medicalReview.reviewNumber} onChange={e=>onPatch({medicalReview:{...project.medicalReview,reviewNumber:e.target.value}})} placeholder="심의 완료 후 입력"/></label><label>심의 완료일<input type="date" value={project.medicalReview.reviewedAt?.slice(0,10)||''} onChange={e=>onPatch({medicalReview:{...project.medicalReview,reviewedAt:e.target.value}})}/></label>{project.medicalReview.locked?<button className="btn secondary wide" onClick={()=>void onUnlock()}><Unlock size={14}/> 문안 잠금 해제·재검토</button>:<button className="btn primary wide" disabled={project.medicalReview.status!=='approved'||!project.medicalReview.reviewNumber} onClick={()=>void onLock()}><Lock size={14}/> 심의 완료 문안 잠금</button>}<small>심의받은 문안의 무단 변경을 막기 위한 내부 관리 기능입니다.</small></div>}</section>
 }
-function PhotoPanel({assets,project,onAttach,onRegister,onDelete}:{assets:BlogAsset[];project:BlogProject;onAttach:(blockId:string,assetId:string)=>void;onRegister:()=>void;onDelete:(assetId:string)=>void}){
+function PhotoPanel({assets,project,onAttach,onRegister,onDelete,onUpdate}:{assets:BlogAsset[];project:BlogProject;onAttach:(blockId:string,assetId:string)=>void;onRegister:()=>void;onDelete:(assetId:string)=>void;onUpdate:(assetId:string,patch:{name?:string;tags?:string[];caption?:string})=>void}){
   const imageBlocks=project.blocks.filter(b=>b.type==='image');
   const [copied,setCopied]=useState('');
+  const [editing,setEditing]=useState<string|null>(null);
+  const [editName,setEditName]=useState('');
+  const [editTags,setEditTags]=useState('');
+  const [editCaption,setEditCaption]=useState('');
   const copyUrl=(assetId:string,url:string)=>{navigator.clipboard.writeText(url).then(()=>{setCopied(assetId);setTimeout(()=>setCopied(''),2000);});};
+  const startEdit=(a:BlogAsset)=>{setEditing(a.assetId);setEditName(a.name);setEditTags(a.tags.join(', '));setEditCaption(a.caption||'');};
+  const saveEdit=async(assetId:string)=>{
+    await onUpdate(assetId,{name:editName,tags:editTags.split(',').map(t=>t.trim()).filter(Boolean),caption:editCaption});
+    setEditing(null);
+  };
   return <section className="blog26-side-section">
     <div className="blog26-side-head"><div><b>사진 라이브러리</b><span style={{color:'#16a34a',fontSize:11}}>✓ 초안 생성 시 AI가 자동 배치</span></div><button className="btn secondary mini" onClick={onRegister}><Plus size={13}/> 사진 등록</button></div>
     {assets.length > 0 && <div style={{fontSize:11,color:'#64748b',background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:6,padding:'6px 10px',marginBottom:8}}>등록된 사진 {assets.length}장이 초안 생성 시 글 내용에 맞게 자동 삽입됩니다.</div>}
@@ -481,19 +490,30 @@ function PhotoPanel({assets,project,onAttach,onRegister,onDelete}:{assets:BlogAs
             ? <img src={a.url} alt={a.name} onError={e=>{(e.target as HTMLImageElement).style.display='none';}} />
             : <ImageIcon size={22}/>}
         </div>
-        <div>
-          <b>{a.name}</b>
-          <small>{a.tags.join(', ')||'태그 없음'}</small>
-          {a.caption&&<small style={{color:'#5a6a83',marginTop:1}}>{a.caption}</small>}
-        </div>
-        <div className="photo-actions">
+        {editing===a.assetId
+          ? <div style={{flex:1,display:'flex',flexDirection:'column',gap:4}}>
+              <input style={{fontSize:11,padding:'3px 6px',border:'1px solid #cbd5e1',borderRadius:4}} value={editName} onChange={e=>setEditName(e.target.value)} placeholder="사진 이름"/>
+              <input style={{fontSize:11,padding:'3px 6px',border:'1px solid #cbd5e1',borderRadius:4}} value={editTags} onChange={e=>setEditTags(e.target.value)} placeholder="태그 (쉼표로 구분)"/>
+              <input style={{fontSize:11,padding:'3px 6px',border:'1px solid #cbd5e1',borderRadius:4}} value={editCaption} onChange={e=>setEditCaption(e.target.value)} placeholder="설명 (AI 컨텍스트)"/>
+              <div style={{display:'flex',gap:4,marginTop:2}}>
+                <button className="btn primary mini" style={{fontSize:10,padding:'2px 8px'}} onClick={()=>saveEdit(a.assetId)}>저장</button>
+                <button className="btn secondary mini" style={{fontSize:10,padding:'2px 8px'}} onClick={()=>setEditing(null)}>취소</button>
+              </div>
+            </div>
+          : <div>
+              <b>{a.name}</b>
+              <small>{a.tags.join(', ')||'태그 없음'}</small>
+              {a.caption&&<small style={{color:'#5a6a83',marginTop:1}}>{a.caption}</small>}
+            </div>}
+        {editing!==a.assetId&&<div className="photo-actions">
+          <button className="blog26-photo-copy-btn" title="수정" onClick={()=>startEdit(a)} style={{color:'#2563eb'}}>수정</button>
           {imageBlocks.length>0&&<select style={{fontSize:10,padding:'3px 5px',border:'1px solid #e2e8f0',borderRadius:6,background:'#fff',color:'#475569',cursor:'pointer'}} defaultValue="" onChange={e=>e.target.value&&onAttach(e.target.value,a.assetId)}>
             <option value="">이미지 블록 연결</option>
             {imageBlocks.map((b,i)=><option key={b.blockId} value={b.blockId}>이미지 블록 {i+1}</option>)}
           </select>}
           {a.url&&!a.url.startsWith('data:')&&<button className="blog26-photo-copy-btn" onClick={()=>copyUrl(a.assetId,a.url)} title="URL 복사">{copied===a.assetId?'✓ 복사됨':'URL 복사'}</button>}
           <button className="blog26-photo-del-btn" title="삭제" onClick={()=>onDelete(a.assetId)}>×</button>
-        </div>
+        </div>}
       </article>)}
       {!assets.length&&<div className="blog26-list-empty small"><ImageIcon size={24}/><b>등록된 사진이 없습니다.</b><span>사진을 등록하면 초안 생성 시 자동으로 배치됩니다.</span></div>}
     </div>

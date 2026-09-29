@@ -957,13 +957,22 @@ async function callBlogGenerationProvider(brief) {
       const photoMap = new Map(photosPayload.map(p => [String(p.id), p]));
 
       if (photosPayload.length > 0) {
-        // photos를 보낸 경우: API가 이미 body에 사진을 삽입합니다.
-        // 남아있는 안내 문구 패턴만 제거합니다.
+        // photos를 보낸 경우: API가 이미 body에 직접 삽입했을 수도 있고
+        // image_library_pick으로만 위치를 알려줄 수도 있습니다(이사 업종 등 신규 업종).
+        // [사진N] 패턴을 실제 이미지로 교체한 뒤 남은 안내 문구를 제거합니다.
+        bodyHtml = bodyHtml.replace(/\[사진(\d+)\]/g, (_, n) => {
+          const idx2 = Number(n) - 1;
+          const pickedId = imagePick[idx2];
+          const picked = pickedId ? photoMap.get(String(pickedId)) : null;
+          const photo = picked || photosPayload[idx2] || null;
+          if (photo?.url) return `<img src="${photo.url}" alt="${photo.tags || ''}" style="max-width:100%;height:auto;display:block;margin:12px 0;"/>`;
+          return '';
+        });
         bodyHtml = bodyHtml
-          .replace(/<[pP][^>]*>\s*📷[^<]*<\/[pP]>/g, '') // <p>📷 사진N...</p>
-          .replace(/<[^>]*>📷[^<]*사진\d+[^<]*<\/[^>]*>/g, '') // 기타 태그 감싸진 형태
-          .replace(/📷[^\n<]*/g, '') // 인라인 형태
-          .replace(/\[사진\d+\]/g, ''); // [사진N] 형태
+          .replace(/<[pP][^>]*>\s*📷[^<]*<\/[pP]>/g, '')
+          .replace(/<[^>]*>📷[^<]*사진\d+[^<]*<\/[^>]*>/g, '')
+          .replace(/📷[^\n<]*/g, '')
+          .replace(/\[사진\d+\]/g, '');
       } else {
         // photos 없이 image_library_pick만 있는 경우: 수동으로 교체
         bodyHtml = bodyHtml.replace(/\[사진(\d+)\]/g, (_, n) => {
@@ -2926,6 +2935,22 @@ const server = http.createServer(async (req, res) => {
 
         // ── 사진 삭제 ──────────────────────────────────────────────────────
         const assetDeleteMatch = pathname.match(/^\/api\/blog\/assets\/([^/]+)$/);
+        if (assetDeleteMatch && req.method === 'PATCH') {
+          const assetId = assetDeleteMatch[1];
+          const cur = await pgPool.query('SELECT data FROM blog_assets WHERE tenant_id=$1 AND id=$2', [tenantId, assetId]);
+          if (!cur.rows.length) return sendJson(res, 404, { error: '자산을 찾을 수 없습니다.' });
+          const data = cur.rows[0].data;
+          if (!ctxCanAccessAdvertiser(payload, data.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          const body = await readJson(req);
+          const updated = {
+            ...data,
+            name: cleanText(String(body.name ?? data.name), 200),
+            tags: Array.isArray(body.tags) ? body.tags.map(t => cleanText(String(t), 100)).filter(Boolean) : data.tags,
+            caption: cleanText(String(body.caption ?? data.caption ?? ''), 500),
+          };
+          await pgPool.query('UPDATE blog_assets SET data=$1 WHERE tenant_id=$2 AND id=$3', [JSON.stringify(updated), tenantId, assetId]);
+          return sendJson(res, 200, updated);
+        }
         if (assetDeleteMatch && req.method === 'DELETE') {
           const assetId = assetDeleteMatch[1];
           const cur = await pgPool.query('SELECT data FROM blog_assets WHERE tenant_id=$1 AND id=$2', [tenantId, assetId]);
