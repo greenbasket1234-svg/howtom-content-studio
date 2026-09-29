@@ -15,7 +15,7 @@ import { analyzeCompliance, isMedicalIndustry } from './complianceEngine';
 import type { BlogAsset, BlogBlock, BlogBlockType, BlogProject, BlogStyleProfile } from './blogTypes';
 import { frontendBlogProviderAdapter, getAdvertiserBlogIntegration, upsertBlogIntegration, type BlogIntegration, type BlogIntegrationMode } from '../../utils/blogIntegrationStore';
 
-const INDUSTRIES=['일반 서비스업','병원·의료기관','치과','한의원','동물병원','세무사·세무법인','학원·교육','자동차·렌트·리스','식품·쇼핑몰','부동산','법률'];
+const INDUSTRIES=['일반 서비스업','병원·의료기관','치과','한의원','동물병원','세무사·세무법인','학원·교육','이삿짐센터·이사업체','자동차·렌트·리스','식품·쇼핑몰','부동산','법률'];
 const STATUS_LABEL:Record<string,string>={draft:'초안',writing:'작성 중',review:'검토 요청',revision:'수정 필요',approved:'승인 완료','publish-ready':'발행 대기',published:'발행 완료',archived:'보관'};
 const REVIEW_LABEL:Record<string,string>={'not-reviewed':'검토 전','check-needed':'확인 필요',preparing:'심의 준비',submitted:'심의 중','revision-requested':'수정 요청',approved:'심의 완료','not-required':'심의 불필요 확인'};
 const BLOCK_LABEL:Record<BlogBlockType,string>={paragraph:'본문',h2:'소제목',h3:'소제목 2',image:'사진',list:'목록',quote:'인용문',faq:'FAQ',cta:'CTA',divider:'구분선',html:'외부 생성 본문(HTML)'};
@@ -280,7 +280,7 @@ export function BlogProductionPage(){
   // 블로그 프로젝트 화면에서 사용자가 자유롭게 바꿀 수 있는 값이라 광고주의 실제 등록
   // 정보(advertiser.industry/autopost_pro_industry)와 어긋날 수 있습니다. 화면에서
   // "가능"으로 보이는데 서버는 거부하는 상황을 막기 위해, 판정 기준을 광고주 레코드로 통일합니다.
-  const AUTOPOST_SUPPORTED_INDUSTRIES:Record<string,string>={'병원·의료기관':'medical','치과':'medical','한의원':'medical','동물병원':'vet','세무사·세무법인':'tax','학원·교육':'academy'};
+  const AUTOPOST_SUPPORTED_INDUSTRIES:Record<string,string>={'병원·의료기관':'medical','치과':'medical','한의원':'medical','동물병원':'vet','세무사·세무법인':'tax','학원·교육':'academy','이삿짐센터·이사업체':'moving'};
   const currentAdvertiser=advertisers.find(a=>a.id===project.advertiserId);
   const advertiserAutopostCode=currentAdvertiser?.autopost_pro_industry||(currentAdvertiser?.industry?AUTOPOST_SUPPORTED_INDUSTRIES[currentAdvertiser.industry]:undefined)||'';
   // "오토포스트 Pro 업종 코드"는 override 전용 필드라, 업종을 나중에 바꿔도 예전 값이
