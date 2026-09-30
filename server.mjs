@@ -998,6 +998,7 @@ async function callBlogGenerationProvider(brief) {
         billing: draft.billing, providerDraftId: draft.id, seatId: draft.seat_id,
         tags: draft.tags || [], metaDescription: draft.meta_description || '',
         imageLibraryPick: imagePick,
+        photoWarnings: Array.isArray(draft.photo_warnings) ? draft.photo_warnings : [],
       };
     } catch (error) {
       if (error.code === 'overage_confirm_required') { const e = new Error(error.message); e.code = 'overage_confirm_required'; e.status = 409; throw e; }
@@ -1444,8 +1445,14 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         'Content-Type': row.rows[0].mime_type || 'image/jpeg',
         'Cache-Control': 'public, max-age=31536000, immutable',
+        // 네이버·외부 서비스가 이미지를 가져갈 수 있도록 핫링크 허용 헤더를 모두 설정합니다.
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET',
+        'Access-Control-Allow-Methods': 'GET, HEAD',
+        'Cross-Origin-Resource-Policy': 'cross-origin', // 네이버 서버사이드 fetch 허용
+        'Timing-Allow-Origin': '*',
+        'X-Content-Type-Options': 'nosniff',
+        // Referer 를 보내지 않아도 접근 가능하도록 설정합니다.
+        'Referrer-Policy': 'no-referrer-when-downgrade',
       });
       res.end(row.rows[0].data);
       return;

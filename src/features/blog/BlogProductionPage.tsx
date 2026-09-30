@@ -99,6 +99,7 @@ export function BlogProductionPage(){
   const [project,setProject]=useState<BlogProject|null>(null);
   const [loading,setLoading]=useState(true);
   const [notice,setNotice]=useState('');
+  const [photoWarnings,setPhotoWarnings]=useState<{id:string;url:string;why:string}[]>([]);
   const [overageConfirm,setOverageConfirm]=useState<{message:string}|null>(null);
   const [query,setQuery]=useState('');
   const [selectedAdvertiser,setSelectedAdvertiser]=useState(()=>isAllSelected?'':globalAdvertiserId);
@@ -217,6 +218,8 @@ export function BlogProductionPage(){
       const result=await blogApi.generate({...project,confirmOverage,idempotencyKey,length:lengthChoice,numImages});
       const next={...project,titleOptions:result.titles,selectedTitle:result.titles[0]||'',blocks:result.blocks,status:'writing' as const,billing:result.billing||null,providerDraftId:result.providerDraftId||null,tags:result.tags||[],metaDescription:result.metaDescription||'',autopostCompliance:null};
       setProject(next);
+      // 사진 경고가 있으면 표시합니다 (네이버 붙여넣기 전 확인 필요)
+      setPhotoWarnings(Array.isArray(result.photoWarnings) ? result.photoWarnings : []);
       setAutopostCompliance(null); // 새로 생성된 본문은 아직 검수를 안 거쳤으니 이전 결과를 지웁니다.
       // 저장까지 완전히 끝난 경우에만 키를 지웁니다. saveWarning이 있으면(외부 생성은
       // 끝났지만 HOWTOM 저장은 실패한 상태) 키를 그대로 남겨둬서, 사용자가 다시 눌러도
@@ -295,6 +298,13 @@ export function BlogProductionPage(){
     <PageHeader title="블로그 제작" description="광고주 정보·문체·자산·SEO·업종별 규정 검수를 한 워크스페이스에서 관리합니다." action={<div className="blog26-head-actions"><button className="btn secondary" onClick={()=>setParams({})}><ChevronLeft size={15}/> 목록</button><button className="btn secondary" onClick={()=>exportFile('txt')}><FileDown size={15}/> TXT</button><button className="btn secondary" onClick={()=>exportFile('html')}><FileDown size={15}/> HTML</button><button className="btn secondary" onClick={()=>setIntegrationOpen(true)}><Link2 size={15}/> 외부 연동</button>{integration&&<button className="btn secondary" onClick={()=>void sendExternal()}><ExternalLink size={15}/> 외부 업체로 보내기</button>}<button className="btn primary" onClick={()=>void save()}><Save size={15}/> 서버 저장</button></div>}/>
     <AutopostProStatusBanner aiStatus={aiStatus}/>
     {notice&&<div className="blog26-notice">{notice}<button onClick={()=>setNotice('')}>×</button></div>}
+    {photoWarnings.length>0&&<div style={{background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:8,padding:'10px 14px',margin:'8px 0',fontSize:12}}>
+      <b style={{color:'#92400e'}}>⚠️ 네이버 블로그 붙여넣기 전 확인하세요</b>
+      <ul style={{margin:'6px 0 0',paddingLeft:16,color:'#78350f'}}>
+        {photoWarnings.map((w,i)=><li key={i}>{w.why}</li>)}
+      </ul>
+      <button style={{marginTop:6,fontSize:11,color:'#64748b',background:'none',border:'none',cursor:'pointer',padding:0}} onClick={()=>setPhotoWarnings([])}>닫기</button>
+    </div>}
     {project.medicalReview.locked&&<div className="blog26-lockbar"><Lock size={16}/><b>심의 완료 문안 잠금</b><span>제목과 본문이 잠겨 있습니다. 수정하려면 재검토 상태로 전환하세요.</span><button className="btn secondary" onClick={()=>void unlock()}><Unlock size={14}/> 재검토로 전환</button></div>}
     <div className="blog26-workspace">
       <aside className="blog26-setup card">
