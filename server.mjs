@@ -940,12 +940,13 @@ async function callBlogGenerationProvider(brief) {
       const reqBody = {
         keyword: brief.primaryKeyword,
         length: mapLengthToAutopostCode(brief.length ?? brief.targetLength),
-        // photos가 있으면 그 수로 자리를 맞춥니다(남는 빈 자리 방지).
         num_images: photosPayload.length > 0
           ? photosPayload.length
           : (Number.isFinite(Number(brief.numImages))
               ? Math.max(0, Number(brief.numImages))
-              : (mapIndustryToAutopostCode(advertiser) === 'moving' ? 5 : 1)),  // 이사 업종은 기본 5장
+              : (mapIndustryToAutopostCode(advertiser) === 'moving' ? 5 : 1)),
+        // include_tags: true → 본문 끝에 해시태그 단락 삽입
+        include_tags: true,
         confirm_overage: Boolean(brief.confirmOverage),
         ...(photosPayload.length ? { photos: photosPayload } : {}),
       };
@@ -996,8 +997,9 @@ async function callBlogGenerationProvider(brief) {
         titles: [draft.title],
         blocks: [{ blockId: `html-${Date.now()}`, type: 'html', title: '', text: bodyHtml }],
         billing: draft.billing, providerDraftId: draft.id, seatId: draft.seat_id,
-        tags: draft.tags || [], metaDescription: draft.meta_description || '',
+        tags: draft.tags || [], tagsText: draft.tags_text || '', metaDescription: draft.meta_description || '',
         imageLibraryPick: imagePick,
+        // photo_warnings는 신규 서버에서 항상 반환됩니다(빈 배열 포함). 없으면 구버전 서버.
         photoWarnings: Array.isArray(draft.photo_warnings) ? draft.photo_warnings : [],
       };
     } catch (error) {

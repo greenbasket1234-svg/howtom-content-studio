@@ -100,6 +100,7 @@ export function BlogProductionPage(){
   const [loading,setLoading]=useState(true);
   const [notice,setNotice]=useState('');
   const [photoWarnings,setPhotoWarnings]=useState<{id:string;url:string;why:string}[]>([]);
+  const [tagsText,setTagsText]=useState('');
   const [overageConfirm,setOverageConfirm]=useState<{message:string}|null>(null);
   const [query,setQuery]=useState('');
   const [selectedAdvertiser,setSelectedAdvertiser]=useState(()=>isAllSelected?'':globalAdvertiserId);
@@ -220,6 +221,7 @@ export function BlogProductionPage(){
       setProject(next);
       // 사진 경고가 있으면 표시합니다 (네이버 붙여넣기 전 확인 필요)
       setPhotoWarnings(Array.isArray(result.photoWarnings) ? result.photoWarnings : []);
+      if (result.tagsText) setTagsText(result.tagsText);
       setAutopostCompliance(null); // 새로 생성된 본문은 아직 검수를 안 거쳤으니 이전 결과를 지웁니다.
       // 저장까지 완전히 끝난 경우에만 키를 지웁니다. saveWarning이 있으면(외부 생성은
       // 끝났지만 HOWTOM 저장은 실패한 상태) 키를 그대로 남겨둬서, 사용자가 다시 눌러도
@@ -304,6 +306,12 @@ export function BlogProductionPage(){
         {photoWarnings.map((w,i)=><li key={i}>{w.why}</li>)}
       </ul>
       <button style={{marginTop:6,fontSize:11,color:'#64748b',background:'none',border:'none',cursor:'pointer',padding:0}} onClick={()=>setPhotoWarnings([])}>닫기</button>
+    </div>}
+    {tagsText&&<div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:8,padding:'8px 12px',margin:'8px 0',display:'flex',alignItems:'center',gap:8,fontSize:12}}>
+      <span style={{color:'#166534',fontWeight:600}}>해시태그</span>
+      <span style={{color:'#15803d',flex:1}}>{tagsText}</span>
+      <button style={{fontSize:11,color:'#16a34a',background:'#dcfce7',border:'1px solid #86efac',borderRadius:4,padding:'2px 8px',cursor:'pointer'}} onClick={()=>navigator.clipboard.writeText(tagsText).then(()=>setNotice('해시태그를 복사했습니다.'))}>복사</button>
+      <button style={{fontSize:11,color:'#64748b',background:'none',border:'none',cursor:'pointer',padding:0}} onClick={()=>setTagsText('')}>×</button>
     </div>}
     {project.medicalReview.locked&&<div className="blog26-lockbar"><Lock size={16}/><b>심의 완료 문안 잠금</b><span>제목과 본문이 잠겨 있습니다. 수정하려면 재검토 상태로 전환하세요.</span><button className="btn secondary" onClick={()=>void unlock()}><Unlock size={14}/> 재검토로 전환</button></div>}
     <div className="blog26-workspace">
