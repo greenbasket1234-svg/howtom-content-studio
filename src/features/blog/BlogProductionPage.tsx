@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useAdvertisers } from '../../hooks/useAdvertisers';
+import { apiFetch } from '../../context/AuthContext';
 import { useAdvertiserContext } from '../../context/AdvertiserContext';
 import { useAuth } from '../../context/AuthContext';
 import { blogApi, OverageConfirmRequiredError } from './blogApi';
@@ -97,7 +98,7 @@ export function BlogProductionPage(){
   // 오토포스트 Pro 업종 목록 동적 로드 (하드코딩 대신 API에서 가져옵니다)
   const [autopostIndustries, setAutopostIndustries] = useState<AutopostIndustry[]>([]);
   useEffect(()=>{
-    apiFetch<{industries: AutopostIndustry[]}>('/api/blog/industries').then(r=>{
+    apiFetch<{industries: AutopostIndustry[]}>('/api/blog/industries').then((r: {industries: AutopostIndustry[]})=>{
       if(r?.industries?.length) setAutopostIndustries(r.industries);
     }).catch(()=>{});
   },[]);
