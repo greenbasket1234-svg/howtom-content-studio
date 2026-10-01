@@ -15,7 +15,10 @@ import { analyzeCompliance, isMedicalIndustry } from './complianceEngine';
 import type { BlogAsset, BlogBlock, BlogBlockType, BlogProject, BlogStyleProfile } from './blogTypes';
 import { frontendBlogProviderAdapter, getAdvertiserBlogIntegration, upsertBlogIntegration, type BlogIntegration, type BlogIntegrationMode } from '../../utils/blogIntegrationStore';
 
-const INDUSTRIES=['일반 서비스업','병원·의료기관','치과','한의원','동물병원','세무사·세무법인','학원·교육','이삿짐센터·이사업체','식당(식품)','자동차·렌트·리스','식품·쇼핑몰','부동산','법률'];
+// 업종 목록은 오토포스트 Pro API(/api/blog/industries)에서 동적으로 로드합니다.
+// 하드코딩 대신 useSupportedIndustries 훅으로 가져옵니다.
+type AutopostIndustry = { code: string; label: string; org_label?: string };
+const INDUSTRIES_FALLBACK = ['일반 서비스업','병원·의료기관','치과','한의원','동물병원','세무사·세무법인','학원·교육','이삿짐센터·이사업체','식당(식품)','렌터카·자동차대여','식품·쇼핑몰','부동산','법률'];
 const STATUS_LABEL:Record<string,string>={draft:'초안',writing:'작성 중',review:'검토 요청',revision:'수정 필요',approved:'승인 완료','publish-ready':'발행 대기',published:'발행 완료',archived:'보관'};
 const REVIEW_LABEL:Record<string,string>={'not-reviewed':'검토 전','check-needed':'확인 필요',preparing:'심의 준비',submitted:'심의 중','revision-requested':'수정 요청',approved:'심의 완료','not-required':'심의 불필요 확인'};
 const BLOCK_LABEL:Record<BlogBlockType,string>={paragraph:'본문',h2:'소제목',h3:'소제목 2',image:'사진',list:'목록',quote:'인용문',faq:'FAQ',cta:'CTA',divider:'구분선',html:'외부 생성 본문(HTML)'};
@@ -91,6 +94,14 @@ function stripHtml(html:string):string{
 function statusTone(status:string){return status==='published'||status==='approved'?'success':status==='revision'?'danger':status==='review'||status==='publish-ready'?'warning':'neutral'}
 
 export function BlogProductionPage(){
+  // 오토포스트 Pro 업종 목록 동적 로드 (하드코딩 대신 API에서 가져옵니다)
+  const [autopostIndustries, setAutopostIndustries] = useState<AutopostIndustry[]>([]);
+  useEffect(()=>{
+    apiFetch<{industries: AutopostIndustry[]}>('/api/blog/industries').then(r=>{
+      if(r?.industries?.length) setAutopostIndustries(r.industries);
+    }).catch(()=>{});
+  },[]);
+
   const [advertisers]=useAdvertisers();
   const { selectedId: globalAdvertiserId, isAllSelected } = useAdvertiserContext();
   const [params,setParams]=useSearchParams();
@@ -285,14 +296,27 @@ export function BlogProductionPage(){
   // 블로그 프로젝트 화면에서 사용자가 자유롭게 바꿀 수 있는 값이라 광고주의 실제 등록
   // 정보(advertiser.industry/autopost_pro_industry)와 어긋날 수 있습니다. 화면에서
   // "가능"으로 보이는데 서버는 거부하는 상황을 막기 위해, 판정 기준을 광고주 레코드로 통일합니다.
-  const AUTOPOST_SUPPORTED_INDUSTRIES:Record<string,string>={'병원·의료기관':'medical','치과':'medical','한의원':'medical','동물병원':'vet','세무사·세무법인':'tax','학원·교육':'academy','이삿짐센터·이사업체':'moving','식당(식품)':'restaurant'};
+  // 오토포스트 지원 업종 매핑: API 응답 기준으로 동적 생성 + 한글 별칭 추가
+  const AUTOPOST_SUPPORTED_INDUSTRIES:Record<string,string>={
+    '병원·의료기관':'medical','치과':'medical','한의원':'medical',
+    '동물병원':'vet','동물병원·수의료기관':'vet',
+    '세무사·세무법인':'tax',
+    '학원·교육':'academy','학원·교습소':'academy',
+    '이삿짐센터·이사업체':'moving',
+    '식당(식품)':'restaurant','식당·요식업':'restaurant',
+    '렌터카·자동차대여':'rental','자동차·렌트·리스':'rental',
+    '온라인 쇼핑몰':'shop','식품·쇼핑몰':'shop',
+    // API에서 동적으로 받은 업종도 추가합니다.
+    ...Object.fromEntries(autopostIndustries.map(i=>[i.label, i.code])),
+  };
   const currentAdvertiser=advertisers.find(a=>a.id===project.advertiserId);
   const advertiserAutopostCode=currentAdvertiser?.autopost_pro_industry||(currentAdvertiser?.industry?AUTOPOST_SUPPORTED_INDUSTRIES[currentAdvertiser.industry]:undefined)||'';
   // "오토포스트 Pro 업종 코드"는 override 전용 필드라, 업종을 나중에 바꿔도 예전 값이
   // 그대로 남아있을 수 있습니다(정확히 이번에 겪으신 문제). medical/tax/academy/vet 4개
   // 코드가 아닌 값이 남아있으면 화면에서 바로 보이게 경고합니다.
   // 오토포스트 Pro 지원 업종 7개: 의료·세무·학원·수의·음식·쇼핑·이사
-  const AUTOPOST_SUPPORTED=['medical','tax','academy','vet','restaurant','shop','moving'];
+  // 지원 코드 목록: API에서 받은 코드 + 하드코딩 fallback
+  const AUTOPOST_SUPPORTED=autopostIndustries.length>0?autopostIndustries.map(i=>i.code):['medical','tax','academy','vet','restaurant','shop','moving','rental'];
   const overrideLooksStale=Boolean(currentAdvertiser?.autopost_pro_industry)&&!AUTOPOST_SUPPORTED.includes(currentAdvertiser!.autopost_pro_industry!);
   const autopostIndustrySupported=aiStatus?.provider!=='autopost-pro'||Boolean(advertiserAutopostCode);
   const autopostMissingBizNo=aiStatus?.provider==='autopost-pro'&&!currentAdvertiser?.business_reg_no;
@@ -319,7 +343,10 @@ export function BlogProductionPage(){
         <div className="blog26-panel-title"><div><small>STEP 1</small><h3>제작 설정</h3></div><button className="icon-btn" onClick={()=>setStyleOpen(true)} title="문체 설정"><Wand2 size={16}/></button></div>
         <label>광고주<select value={project.advertiserId} disabled><option>{project.advertiserName}</option></select></label>
         <label>플랫폼<select value={project.platform} onChange={e=>patchLocal({platform:e.target.value})} disabled={project.medicalReview.locked}><option>네이버 블로그</option><option>자사 블로그</option><option>기타</option></select></label>
-        <label>업종<select value={project.industry} onChange={e=>patchLocal({industry:e.target.value,options:{...project.options,medical:isMedicalIndustry(e.target.value)}})} disabled={project.medicalReview.locked}>{INDUSTRIES.map(x=><option key={x}>{x}</option>)}</select></label>
+        <label>업종<select value={project.industry} onChange={e=>patchLocal({industry:e.target.value,options:{...project.options,medical:isMedicalIndustry(e.target.value)}})} disabled={project.medicalReview.locked}>{/* 일반 업종 */}
+              {INDUSTRIES_FALLBACK.map(x=><option key={x}>{x}</option>)}
+              {/* 오토포스트 Pro 업종 (API에서 동적 로드) */}
+              {autopostIndustries.filter(i=>!INDUSTRIES_FALLBACK.includes(i.label)).map(i=><option key={i.code} value={i.label}>{i.label}</option>)}</select></label>
         <label>콘텐츠 유형<select value={project.contentType} onChange={e=>patchLocal({contentType:e.target.value})} disabled={project.medicalReview.locked}>{['정보형 블로그','검색 유입형','상담 유도형','브랜드형','FAQ형'].map(x=><option key={x}>{x}</option>)}</select></label>
         <label>메인 키워드<input value={project.primaryKeyword} onChange={e=>patchLocal({primaryKeyword:e.target.value})} placeholder="핵심 키워드" disabled={project.medicalReview.locked}/></label>
         <label>서브 키워드{aiStatus?.provider==='autopost-pro'&&<small className="blog26-field-note"> · 오토포스트 Pro에는 전달되지 않는 HOWTOM 내부 참고용입니다</small>}<input value={project.secondaryKeywords.join(', ')} onChange={e=>patchLocal({secondaryKeywords:split(e.target.value)})} placeholder="쉼표로 구분" disabled={project.medicalReview.locked}/></label>
@@ -352,7 +379,7 @@ export function BlogProductionPage(){
           <label><input type="checkbox" checked={project.options.seo} onChange={e=>patchLocal({options:{...project.options,seo:e.target.checked}})}/> SEO 사전점검</label>
           {medical&&<label className="medical"><input type="checkbox" checked={project.options.medical} onChange={e=>patchLocal({options:{...project.options,medical:e.target.checked}})}/> 의료광고 사전점검</label>}
         </div>
-        {!autopostIndustrySupported&&<div className="blog26-usage-warn" style={{marginBottom:8}}>현재 오토포스트 Pro 블로그 생성이 지원되지 않는 업종입니다. (병원·치과·한의원·동물병원·세무·학원·이삿짐·이사업체·식당(식품) 지원)</div>}
+        {!autopostIndustrySupported&&<div className="blog26-usage-warn" style={{marginBottom:8}}>현재 오토포스트 Pro 블로그 생성이 지원되지 않는 업종입니다. (지원: {autopostIndustries.length>0?autopostIndustries.map(i=>i.label).join('·'):'병원·세무·학원·동물병원·이사·식당·쇼핑몰·렌터카'})</div>}
         {autopostIndustrySupported&&autopostMissingBizNo&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이 광고주는 사업자등록번호가 등록되어 있지 않습니다. HOWTOM Universe의 광고주 정보에서 먼저 입력하세요.</div>}
         {aiStatus?.provider==='autopost-pro'&&overrideLooksStale&&<div className="blog26-usage-warn" style={{marginBottom:8}}>⚠ 이 광고주의 "오토포스트 Pro 업종 코드"에 <b>"{currentAdvertiser?.autopost_pro_industry}"</b>가 들어있어 실제 업종({currentAdvertiser?.industry})과 다르게 이 값이 우선 적용됩니다. medical/tax/academy/vet/restaurant/shop/moving 중 하나가 아니라면 업종을 바꾸신 뒤 남은 예전 값일 수 있으니, HOWTOM Universe에서 이 필드를 비워두거나 올바른 코드로 수정하세요.</div>}
         {retryReason==='save_failed'&&<div className="blog26-usage-warn" style={{marginBottom:8}}>이전 생성이 완료됐지만 저장에 실패했습니다(이미 과금됐을 수 있음). 아래 버튼은 재생성하지 않고 저장만 다시 시도합니다. 이미 방금 저장에 성공했다면(화면이 갱신 안 됐을 수 있음) <button type="button" className="btn secondary mini" onClick={()=>void reload()}>새로고침</button>으로 최신 상태를 다시 불러오거나, 이 시도를 포기하고 <button type="button" className="btn secondary mini" onClick={()=>{if(confirm('이 생성 시도를 포기하고 새로 만드시겠어요? 방금 그 초안이 이미 저장됐다면 그대로 남고, 새로 누르면 새로운 생성 1건으로 별도 처리됩니다.')){setPendingIdempotencyKey(null);setRetryReason(null);}}}>취소하고 새로 만들기</button>를 누르세요.</div>}

@@ -680,9 +680,10 @@ const AUTOPOST_INDUSTRY_MAP = {
   '동물병원': 'vet', '세무사·세무법인': 'tax', '학원·교육': 'academy',
   '이삿짐센터': 'moving', '이사업체': 'moving', '이사': 'moving', '포장이사': 'moving',
   '식당': 'restaurant', '음식점': 'restaurant', '식당(식품)': 'restaurant', '카페': 'restaurant', '베이커리': 'restaurant',
+  '렌터카': 'rental', '자동차대여': 'rental', '렌트카': 'rental', '렌터카·자동차대여': 'rental', '자동차·렌트·리스': 'rental',
 };
 // 지원 업종 목록 (의료·수의·세무·학원·음식·쇼핑·이사)
-const SUPPORTED_INDUSTRIES = ['medical', 'tax', 'academy', 'vet', 'restaurant', 'shop', 'moving'];
+const SUPPORTED_INDUSTRIES = ['medical', 'tax', 'academy', 'vet', 'restaurant', 'shop', 'moving', 'rental'];
 function mapIndustryToAutopostCode(advertiser) {
   if (advertiser.autopost_pro_industry) return advertiser.autopost_pro_industry;
   return AUTOPOST_INDUSTRY_MAP[advertiser.industry || ''] || advertiser.industry || '';
@@ -2255,6 +2256,33 @@ const server = http.createServer(async (req, res) => {
         if (!requireDb(res)) return;
         const tenantId = await getCurrentTenantId();
         if (!tenantId) return sendJson(res, 409, { error: 'HOWTOM tenant를 찾을 수 없습니다.' });
+
+        // ── 업종 목록 동적 조회 (오토포스트 Pro API 위임) ────────────────────
+        if (req.method === 'GET' && pathname === '/api/blog/industries') {
+          try {
+            const now = Date.now();
+            if (!global._industriesCache || now - global._industriesCache.ts > 3600_000) {
+              const resp = await fetch(`${AUTOPOST_PRO_BASE_URL}/v1/industries`, {
+                headers: { Authorization: `Bearer ${AUTOPOST_PRO_API_KEY}`, 'Content-Type': 'application/json' },
+              });
+              if (!resp.ok) throw new Error(`industries ${resp.status}`);
+              global._industriesCache = { ts: now, data: await resp.json() };
+            }
+            return sendJson(res, 200, global._industriesCache.data);
+          } catch {
+            // API 실패 시 fallback
+            return sendJson(res, 200, { industries: [
+              { code: 'medical',    label: '병원·의료기관',       org_label: '병원명' },
+              { code: 'vet',        label: '동물병원·수의료기관', org_label: '병원명' },
+              { code: 'tax',        label: '세무사·세무법인',      org_label: '업체명' },
+              { code: 'academy',    label: '학원·교습소',          org_label: '학원명' },
+              { code: 'moving',     label: '이삿짐센터·이사업체',  org_label: '업체명' },
+              { code: 'restaurant', label: '식당·요식업',          org_label: '상호'   },
+              { code: 'shop',       label: '온라인 쇼핑몰',        org_label: '상호'   },
+              { code: 'rental',     label: '렌터카·자동차대여',    org_label: '상호'   },
+            ]});
+          }
+        }
 
         if (req.method === 'GET' && pathname === '/api/blog/projects') {
           const r = payload.advertiserIds !== null
