@@ -679,6 +679,7 @@ const AUTOPOST_INDUSTRY_MAP = {
   '병원·의료기관': 'medical', '치과': 'medical', '한의원': 'medical',
   '동물병원': 'vet', '세무사·세무법인': 'tax', '학원·교육': 'academy',
   '이삿짐센터': 'moving', '이사업체': 'moving', '이사': 'moving', '포장이사': 'moving',
+  '식당': 'restaurant', '음식점': 'restaurant', '식당(식품)': 'restaurant', '카페': 'restaurant', '베이커리': 'restaurant',
 };
 // 지원 업종 목록 (의료·수의·세무·학원·음식·쇼핑·이사)
 const SUPPORTED_INDUSTRIES = ['medical', 'tax', 'academy', 'vet', 'restaurant', 'shop', 'moving'];
