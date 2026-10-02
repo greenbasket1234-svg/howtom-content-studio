@@ -16,10 +16,11 @@ import { analyzeCompliance, isMedicalIndustry } from './complianceEngine';
 import type { BlogAsset, BlogBlock, BlogBlockType, BlogProject, BlogStyleProfile } from './blogTypes';
 import { frontendBlogProviderAdapter, getAdvertiserBlogIntegration, upsertBlogIntegration, type BlogIntegration, type BlogIntegrationMode } from '../../utils/blogIntegrationStore';
 
-// 업종 목록은 오토포스트 Pro API(/api/blog/industries)에서 동적으로 로드합니다.
-// 하드코딩 대신 useSupportedIndustries 훅으로 가져옵니다.
 type AutopostIndustry = { code: string; label: string; org_label?: string };
-const INDUSTRIES_FALLBACK = ['일반 서비스업','병원·의료기관','치과','한의원','동물병원','세무사·세무법인','학원·교육','이삿짐센터·이사업체','식당(식품)','렌터카·자동차대여','식품·쇼핑몰','부동산','법률'];
+// 오토포스트와 무관한 일반 업종 (항상 표시)
+const GENERAL_INDUSTRIES = ['일반 서비스업', '부동산', '법률'];
+// 오토포스트 업종 fallback (API 미연결 시)
+const AUTOPOST_INDUSTRIES_FALLBACK = ['병원·의료기관','치과','한의원','동물병원','세무사·세무법인','학원·교육','이삿짐센터·이사업체','식당(식품)','렌터카·자동차대여','온라인 쇼핑몰'];
 const STATUS_LABEL:Record<string,string>={draft:'초안',writing:'작성 중',review:'검토 요청',revision:'수정 필요',approved:'승인 완료','publish-ready':'발행 대기',published:'발행 완료',archived:'보관'};
 const REVIEW_LABEL:Record<string,string>={'not-reviewed':'검토 전','check-needed':'확인 필요',preparing:'심의 준비',submitted:'심의 중','revision-requested':'수정 요청',approved:'심의 완료','not-required':'심의 불필요 확인'};
 const BLOCK_LABEL:Record<BlogBlockType,string>={paragraph:'본문',h2:'소제목',h3:'소제목 2',image:'사진',list:'목록',quote:'인용문',faq:'FAQ',cta:'CTA',divider:'구분선',html:'외부 생성 본문(HTML)'};
@@ -344,10 +345,10 @@ export function BlogProductionPage(){
         <div className="blog26-panel-title"><div><small>STEP 1</small><h3>제작 설정</h3></div><button className="icon-btn" onClick={()=>setStyleOpen(true)} title="문체 설정"><Wand2 size={16}/></button></div>
         <label>광고주<select value={project.advertiserId} disabled><option>{project.advertiserName}</option></select></label>
         <label>플랫폼<select value={project.platform} onChange={e=>patchLocal({platform:e.target.value})} disabled={project.medicalReview.locked}><option>네이버 블로그</option><option>자사 블로그</option><option>기타</option></select></label>
-        <label>업종<select value={project.industry} onChange={e=>patchLocal({industry:e.target.value,options:{...project.options,medical:isMedicalIndustry(e.target.value)}})} disabled={project.medicalReview.locked}>{/* 일반 업종 */}
-              {INDUSTRIES_FALLBACK.map(x=><option key={x}>{x}</option>)}
-              {/* 오토포스트 Pro 업종 (API에서 동적 로드) */}
-              {autopostIndustries.filter(i=>!INDUSTRIES_FALLBACK.includes(i.label)).map(i=><option key={i.code} value={i.label}>{i.label}</option>)}</select></label>
+        <label>업종<select value={project.industry} onChange={e=>patchLocal({industry:e.target.value,options:{...project.options,medical:isMedicalIndustry(e.target.value)}})} disabled={project.medicalReview.locked}>{/* 일반(비오토포스트) 업종 — 항상 표시 */}
+              {GENERAL_INDUSTRIES.map(x=><option key={x}>{x}</option>)}
+              {/* 오토포스트 업종: API 로드 시 API 목록만, 미로드 시 fallback */}
+              {(autopostIndustries.length>0 ? autopostIndustries : AUTOPOST_INDUSTRIES_FALLBACK.map(x=>({code:x,label:x}))).map(i=><option key={i.code} value={i.label}>{i.label}</option>)}</select></label>
         <label>콘텐츠 유형<select value={project.contentType} onChange={e=>patchLocal({contentType:e.target.value})} disabled={project.medicalReview.locked}>{['정보형 블로그','검색 유입형','상담 유도형','브랜드형','FAQ형'].map(x=><option key={x}>{x}</option>)}</select></label>
         <label>메인 키워드<input value={project.primaryKeyword} onChange={e=>patchLocal({primaryKeyword:e.target.value})} placeholder="핵심 키워드" disabled={project.medicalReview.locked}/></label>
         <label>서브 키워드{aiStatus?.provider==='autopost-pro'&&<small className="blog26-field-note"> · 오토포스트 Pro에는 전달되지 않는 HOWTOM 내부 참고용입니다</small>}<input value={project.secondaryKeywords.join(', ')} onChange={e=>patchLocal({secondaryKeywords:split(e.target.value)})} placeholder="쉼표로 구분" disabled={project.medicalReview.locked}/></label>
