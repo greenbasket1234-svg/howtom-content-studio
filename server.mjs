@@ -1581,22 +1581,28 @@ const server = http.createServer(async (req, res) => {
       if (!account.password_hash || !verifyUserPassword(password, account.password_hash)) {
         return sendJson(res, 401, { error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
       }
-      const advertiserId = (account.advertiser_ids || [])[0] || null;
-      // 구독 등급 확인 — advertiser_subscriptions.plan_name으로 판단합니다.
+      const allAdvertiserIds = account.advertiser_ids || [];
+      // 복수 브랜드 계정: 모든 브랜드의 구독 등급을 확인하고 최대값을 사용합니다.
+      // 하나라도 CONTENT PRO이면 로그인을 허용합니다.
       let tier = 0;
-      if (advertiserId && pgPool) {
-        const subRow = await pgPool.query(
-          `SELECT plan_name FROM advertiser_subscriptions WHERE advertiser_id::text = $1 ORDER BY updated_at DESC LIMIT 1`,
-          [advertiserId]
-        );
-        tier = portalTierFromPlanName(subRow.rows[0]?.plan_name || '');
-        console.log(`[Studio 로그인] 광고주 계정 ${email} | advertiserId=${advertiserId} | plan_name=${subRow.rows[0]?.plan_name} | tier=${tier}`);
+      let bestAdvertiserId = allAdvertiserIds[0] || null;
+      if (allAdvertiserIds.length > 0 && pgPool) {
+        for (const advId of allAdvertiserIds) {
+          const subRow = await pgPool.query(
+            `SELECT plan_name FROM advertiser_subscriptions WHERE advertiser_id::text = $1 ORDER BY updated_at DESC LIMIT 1`,
+            [advId]
+          );
+          const t = portalTierFromPlanName(subRow.rows[0]?.plan_name || '');
+          console.log(`[Studio 로그인] 광고주 계정 ${email} | advertiserId=${advId} | plan_name=${subRow.rows[0]?.plan_name} | tier=${t}`);
+          if (t > tier) { tier = t; bestAdvertiserId = advId; }
+        }
       }
       if (tier < 3) {
         return sendJson(res, 403, { error: `콘텐츠 제작소는 CONTENT PRO 구독에서 이용할 수 있습니다. 유니버스 관리자 → 광고주 → 계약 구독에서 'CONTENT PRO'로 설정해주세요.` });
       }
-      const token = signToken({ email, name: account.name, isAdvertiserAccount: true, advertiserId, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
-      return sendJson(res, 200, { token, user: { email, name: account.name, isAdvertiserAccount: true, advertiserId } });
+      // advertiserIds 전체를 토큰에 담아 여러 브랜드 전환이 가능하도록 합니다.
+      const token = signToken({ email, name: account.name, isAdvertiserAccount: true, advertiserId: bestAdvertiserId, advertiserIds: allAdvertiserIds, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
+      return sendJson(res, 200, { token, user: { email, name: account.name, isAdvertiserAccount: true, advertiserId: bestAdvertiserId, advertiserIds: allAdvertiserIds } });
     }
 
     if (pathname.startsWith('/api/')) {
