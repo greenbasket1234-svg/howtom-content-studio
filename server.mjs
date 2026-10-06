@@ -628,18 +628,25 @@ const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
 const cloudinaryConfigured  = () => Boolean(CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET);
 
 async function uploadToCloudinary(buffer, mimeType, publicId) {
-  if (!cloudinaryConfigured()) return null;
+  if (!cloudinaryConfigured()) {
+    console.warn('[Cloudinary] 환경변수 미설정 (CLOUDINARY_CLOUD_NAME / API_KEY / API_SECRET)');
+    return null;
+  }
+  console.log(`[Cloudinary] 업로드 시작: ${publicId} (${Math.round(buffer.length/1024)}KB, cloud=${CLOUDINARY_CLOUD_NAME})`);
   try {
-    const crypto = await import('crypto');
+    const { createHash } = await import('crypto');
     const timestamp = Math.floor(Date.now() / 1000);
     const folder = 'howtom-studio';
-    const toSign = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
-    const signature = crypto.createHash('sha1').update(toSign).digest('hex');
+    const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
 
-    // Node 18+ 내장 FormData + fetch 사용
+    // 서명: folder, public_id, timestamp 파라미터를 알파벳 순서로 정렬 후 api_secret을 붙입니다.
+    const toSign = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
+    const signature = createHash('sha1').update(toSign).digest('hex');
+
+    // Node 18+ Blob API를 사용해 이진 데이터를 파일로 전송합니다.
     const form = new FormData();
-    const base64Data = buffer.toString('base64');
-    form.append('file', `data:${mimeType};base64,${base64Data}`);
+    const blob = new Blob([buffer], { type: mimeType });
+    form.append('file', blob, `${publicId}.${ext}`);
     form.append('public_id', publicId);
     form.append('folder', folder);
     form.append('timestamp', String(timestamp));
@@ -652,14 +659,14 @@ async function uploadToCloudinary(buffer, mimeType, publicId) {
     );
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      console.warn('[Cloudinary] 업로드 실패:', res.status, errText.slice(0, 200));
+      console.error('[Cloudinary] 업로드 실패:', res.status, errText.slice(0, 300));
       return null;
     }
     const data = await res.json();
-    console.log('[Cloudinary] 업로드 성공:', data.secure_url);
+    console.log('[Cloudinary] 업로드 성공 →', data.secure_url);
     return data.secure_url || null;
   } catch (e) {
-    console.warn('[Cloudinary] 오류:', e?.message);
+    console.error('[Cloudinary] 예외:', e?.message);
     return null;
   }
 }
