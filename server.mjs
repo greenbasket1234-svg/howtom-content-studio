@@ -1620,6 +1620,20 @@ const server = http.createServer(async (req, res) => {
         if (!pgPool) return sendJson(res, 200, []);
         const tenantId = await getCurrentTenantId();
         if (!tenantId) return sendJson(res, 200, []);
+
+        const isAdminUser = payload.type === 'owner' || payload.type === 'admin';
+
+        // 비어드민(광고주 포털·팀원)은 CONTENT PRO 구독 광고주만 접근 가능합니다.
+        // 같은 계정으로 여러 브랜드를 관리해도 CONTENT PRO 미구독 브랜드는 표시되지 않습니다.
+        const advFilter = payload.advertiserIds !== null ? 'AND a.id::text=ANY($2::text[])' : '';
+        const contentProFilter = !isAdminUser
+          ? `AND EXISTS (
+               SELECT 1 FROM advertiser_subscriptions s
+               WHERE s.advertiser_id = a.id
+                 AND UPPER(s.plan_name) LIKE '%CONTENT%'
+             )`
+          : '';
+
         const result = await pgPool.query(`
           SELECT a.id::text AS id, a.name,
                  COALESCE(to_jsonb(a)->>'industry','') AS industry,
@@ -1628,8 +1642,11 @@ const server = http.createServer(async (req, res) => {
                  COALESCE(to_jsonb(a)->>'address','') AS address,
                  to_jsonb(a)->>'business_reg_no' AS business_reg_no,
                  to_jsonb(a)->>'autopost_pro_industry' AS autopost_pro_industry
-          FROM advertisers a WHERE a.tenant_id=$1 ${payload.advertiserIds !== null ? 'AND a.id::text=ANY($2::text[])' : ''} ORDER BY a.name
+          FROM advertisers a
+          WHERE a.tenant_id=$1 ${advFilter} ${contentProFilter}
+          ORDER BY a.name
         `, payload.advertiserIds !== null ? [tenantId, payload.advertiserIds] : [tenantId]);
+
         return sendJson(res, 200, result.rows);
       }
 
