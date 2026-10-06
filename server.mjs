@@ -617,6 +617,52 @@ function blogGenerationConfigured() { return Boolean(AUTOPOST_PRO_API_KEY) || Bo
    명시적으로 동의한 경우에만 전달합니다.
    ======================================================================== */
 const AUTOPOST_PRO_API_KEY = process.env.AUTOPOST_PRO_API_KEY || '';
+
+// ── Cloudinary 영구 이미지 저장소 설정 ──────────────────────────────────
+// Railway 재배포 시에도 URL이 유지되는 영구 저장소입니다.
+// Railway 환경변수에 CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET 설정 필요.
+// 미설정 시 기존 PostgreSQL BYTEA 저장으로 fallback됩니다.
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || '';
+const CLOUDINARY_API_KEY    = process.env.CLOUDINARY_API_KEY    || '';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
+const cloudinaryConfigured  = () => Boolean(CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET);
+
+async function uploadToCloudinary(buffer, mimeType, publicId) {
+  if (!cloudinaryConfigured()) return null;
+  try {
+    const crypto = await import('crypto');
+    const timestamp = Math.floor(Date.now() / 1000);
+    const folder = 'howtom-studio';
+    const toSign = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
+    const signature = crypto.createHash('sha1').update(toSign).digest('hex');
+
+    // Node 18+ 내장 FormData + fetch 사용
+    const form = new FormData();
+    const base64Data = buffer.toString('base64');
+    form.append('file', `data:${mimeType};base64,${base64Data}`);
+    form.append('public_id', publicId);
+    form.append('folder', folder);
+    form.append('timestamp', String(timestamp));
+    form.append('api_key', CLOUDINARY_API_KEY);
+    form.append('signature', signature);
+
+    const res = await fetch(
+      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+      { method: 'POST', body: form }
+    );
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.warn('[Cloudinary] 업로드 실패:', res.status, errText.slice(0, 200));
+      return null;
+    }
+    const data = await res.json();
+    console.log('[Cloudinary] 업로드 성공:', data.secure_url);
+    return data.secure_url || null;
+  } catch (e) {
+    console.warn('[Cloudinary] 오류:', e?.message);
+    return null;
+  }
+}
 const AUTOPOST_PRO_BASE_URL = process.env.AUTOPOST_PRO_BASE_URL || 'https://aiblog.zionlabs.org';
 function autopostProConfigured() { return Boolean(AUTOPOST_PRO_API_KEY); }
 
@@ -2359,6 +2405,14 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { ok: true });
         }
 
+        if (req.method === 'GET' && pathname === '/api/blog/storage-status') {
+          return sendJson(res, 200, {
+            cloudinary: cloudinaryConfigured(),
+            message: cloudinaryConfigured()
+              ? 'Cloudinary 연결됨 — 영구 이미지 URL 사용 중'
+              : 'Cloudinary 미설정 — Railway URL 사용 중(재배포 시 이미지가 잠깐 끊길 수 있습니다)',
+          });
+        }
         if (req.method === 'GET' && pathname === '/api/blog/ai-status') {
           return sendJson(res, 200, { configured: blogGenerationConfigured(), provider: autopostProConfigured() ? 'autopost-pro' : (blogGenerationConfigured() ? 'partner' : null) });
         }
@@ -2952,12 +3006,24 @@ const server = http.createServer(async (req, res) => {
             [assetId, tenantId, processedMime, processedData.length, processedData]
           );
 
-          // 공개 URL: /photos/:id.ext (인증 없이 접근 가능 — 네이버 편집기에서 사용)
-          const host = req.headers.host || '';
-          const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '';
-          const isSecure = process.env.SITE_URL || railwayDomain || host.includes('railway.app') || host.includes('howtom');
-          const baseUrl = (process.env.SITE_URL || railwayDomain || `${isSecure ? 'https' : 'http'}://${host}`).replace(/\/$/, '');
-          const publicUrl = `${baseUrl}/photos/${assetId}${ext}`;
+          // ── 영구 URL 결정 ─────────────────────────────────────────────────
+          // 1순위: Cloudinary (재배포와 무관한 영구 CDN URL)
+          // 2순위: Railway /photos/ 엔드포인트 (BYTEA → PostgreSQL 영구 저장)
+          let publicUrl = '';
+          const cloudinaryUrl = await uploadToCloudinary(processedData, processedMime, assetId);
+          if (cloudinaryUrl) {
+            publicUrl = cloudinaryUrl;
+            console.log(`[업로드] Cloudinary 영구 URL 사용: ${assetId}`);
+          } else {
+            const host = req.headers.host || '';
+            const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '';
+            const isSecure = process.env.SITE_URL || railwayDomain || host.includes('railway.app') || host.includes('howtom');
+            const baseUrl = (process.env.SITE_URL || railwayDomain || `${isSecure ? 'https' : 'http'}://${host}`).replace(/\/$/, '');
+            publicUrl = `${baseUrl}/photos/${assetId}${ext}`;
+            if (!cloudinaryConfigured()) {
+              console.warn(`[업로드] Cloudinary 미설정 — Railway URL 사용(재배포 시 잠깐 끊길 수 있음): ${publicUrl}`);
+            }
+          }
 
           const row = {
             assetId, advertiserId,

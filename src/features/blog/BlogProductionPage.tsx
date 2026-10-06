@@ -98,10 +98,14 @@ function statusTone(status:string){return status==='published'||status==='approv
 export function BlogProductionPage(){
   // 오토포스트 Pro 업종 목록 동적 로드 (하드코딩 대신 API에서 가져옵니다)
   const [autopostIndustries, setAutopostIndustries] = useState<AutopostIndustry[]>([]);
+  const [cloudinaryOk, setCloudinaryOk] = useState<boolean|null>(null);
   useEffect(()=>{
     apiFetch<{industries: AutopostIndustry[]}>('/api/blog/industries').then((r: {industries: AutopostIndustry[]})=>{
       if(r?.industries?.length) setAutopostIndustries(r.industries);
     }).catch(()=>{});
+    apiFetch<{cloudinary: boolean}>('/api/blog/storage-status').then((r: {cloudinary: boolean})=>{
+      setCloudinaryOk(r?.cloudinary ?? false);
+    }).catch(()=>{ setCloudinaryOk(false); });
   },[]);
 
   const [advertisers]=useAdvertisers();
@@ -332,6 +336,14 @@ export function BlogProductionPage(){
         {photoWarnings.map((w,i)=><li key={i}>{w.why}</li>)}
       </ul>
       <button style={{marginTop:6,fontSize:11,color:'#64748b',background:'none',border:'none',cursor:'pointer',padding:0}} onClick={()=>setPhotoWarnings([])}>닫기</button>
+    </div>}
+    {cloudinaryOk===false&&<div style={{background:'#fff7ed',border:'1px solid #fdba74',borderRadius:8,padding:'10px 14px',margin:'8px 0',fontSize:12}}>
+      <b style={{color:'#92400e'}}>⚠️ 이미지 영구 저장소 미설정</b>
+      <p style={{color:'#78350f',margin:'4px 0 0'}}>
+        현재 사진이 Railway 서버에 임시 저장됩니다. 재배포 시 이미지 URL이 끊겨 네이버 블로그 사진이 사라질 수 있습니다.<br/>
+        <b>해결방법:</b> Railway 환경변수에 <code>CLOUDINARY_CLOUD_NAME</code>, <code>CLOUDINARY_API_KEY</code>, <code>CLOUDINARY_API_SECRET</code> 설정 후 재배포하면 영구 URL로 저장됩니다.
+        (<a href="https://cloudinary.com" target="_blank" rel="noreferrer" style={{color:'#c2410c'}}>Cloudinary 무료 가입 →</a>)
+      </p>
     </div>}
     {tagsText&&<div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:8,padding:'8px 12px',margin:'8px 0',display:'flex',alignItems:'center',gap:8,fontSize:12}}>
       <span style={{color:'#166534',fontWeight:600}}>해시태그</span>
