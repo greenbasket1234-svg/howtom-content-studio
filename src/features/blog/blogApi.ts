@@ -3,7 +3,7 @@ import type { AutopostBilling, AutopostComplianceResult, AutopostSeat, BlogAsset
 
 export class OverageConfirmRequiredError extends Error {}
 
-export type GenerateResponse = { generator: string; aiError?: string; titles: string[]; blocks: BlogProject['blocks']; billing?: AutopostBilling | null; providerDraftId?: string | null; tags?: string[]; tagsText?: string; metaDescription?: string; idempotencyKey: string; saveWarning?: string; replayed?: boolean; photoWarnings?: {id:string;url:string;why:string}[] };
+export type GenerateResponse = { generator: string; aiError?: string; titles: string[]; blocks: BlogProject['blocks']; billing?: AutopostBilling | null; providerDraftId?: string | null; tags?: string[]; tagsText?: string; metaDescription?: string; idempotencyKey: string; saveWarning?: string; replayed?: boolean; photoWarnings?: {id:string;url:string;why:string}[]; styleWarnings?: {index:number;label:string;matched:string[];message:string}[] };
 export type SeatListItem = AutopostSeat & { advertiser_id: string; advertiser_name: string };
 
 export const blogApi = {

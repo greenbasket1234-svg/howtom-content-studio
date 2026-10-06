@@ -117,6 +117,7 @@ export function BlogProductionPage(){
   const [loading,setLoading]=useState(true);
   const [notice,setNotice]=useState('');
   const [photoWarnings,setPhotoWarnings]=useState<{id:string;url:string;why:string}[]>([]);
+  const [styleWarnings,setStyleWarnings]=useState<{index:number;label:string;matched:string[];message:string}[]>([]);
   const [tagsText,setTagsText]=useState('');
   const [overageConfirm,setOverageConfirm]=useState<{message:string}|null>(null);
   const [query,setQuery]=useState('');
@@ -239,6 +240,7 @@ export function BlogProductionPage(){
       // 사진 경고가 있으면 표시합니다 (네이버 붙여넣기 전 확인 필요)
       setPhotoWarnings(Array.isArray(result.photoWarnings) ? result.photoWarnings : []);
       if (result.tagsText) setTagsText(result.tagsText);
+      if (Array.isArray(result.styleWarnings) && result.styleWarnings.length > 0) setStyleWarnings(result.styleWarnings);
       setAutopostCompliance(null); // 새로 생성된 본문은 아직 검수를 안 거쳤으니 이전 결과를 지웁니다.
       // 저장까지 완전히 끝난 경우에만 키를 지웁니다. saveWarning이 있으면(외부 생성은
       // 끝났지만 HOWTOM 저장은 실패한 상태) 키를 그대로 남겨둬서, 사용자가 다시 눌러도
@@ -345,6 +347,13 @@ export function BlogProductionPage(){
         (<a href="https://cloudinary.com" target="_blank" rel="noreferrer" style={{color:'#c2410c'}}>Cloudinary 무료 가입 →</a>)
       </p>
     </div>}
+    {styleWarnings.length>0&&<div style={{background:'#fef3c7',border:'1px solid #fcd34d',borderRadius:8,padding:'10px 14px',margin:'8px 0',fontSize:12}}>
+      <b style={{color:'#92400e'}}>⚠️ 문체 샘플 주의</b>
+      <ul style={{margin:'6px 0 0',paddingLeft:16,color:'#78350f'}}>
+        {styleWarnings.map((w,i)=><li key={i}>{w.message}</li>)}
+      </ul>
+      <button style={{marginTop:6,fontSize:11,color:'#64748b',background:'none',border:'none',cursor:'pointer',padding:0}} onClick={()=>setStyleWarnings([])}>닫기</button>
+    </div>}
     {tagsText&&<div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:8,padding:'8px 12px',margin:'8px 0',display:'flex',alignItems:'center',gap:8,fontSize:12}}>
       <span style={{color:'#166534',fontWeight:600}}>해시태그</span>
       <span style={{color:'#15803d',flex:1}}>{tagsText}</span>
@@ -370,7 +379,7 @@ export function BlogProductionPage(){
         {aiStatus?.provider==='autopost-pro'&&<label>본문 이미지 자리 수<input type="number" min={0} max={8} value={numImages} onChange={e=>setNumImages(Math.max(0,Math.min(8,Number(e.target.value)||0)))} disabled={project.medicalReview.locked}/></label>}
         <label>발행 예정일<input type="date" value={project.scheduledAt?.slice(0,10)||''} onChange={e=>patchLocal({scheduledAt:e.target.value})}/></label>
         <label>톤앤매너{aiStatus?.provider==='autopost-pro'&&<small className="blog26-field-note"> · 내부 참고용</small>}<select value={project.tone} onChange={e=>patchLocal({tone:e.target.value})} disabled={project.medicalReview.locked}><option>광고주 문체 자동 적용</option><option>친절한 전문가형</option><option>정보 중심형</option><option>부드러운 상담형</option><option>간결한 실무형</option></select></label>
-        <label>참고자료{aiStatus?.provider==='autopost-pro'&&<small className="blog26-field-note"> · 오토포스트 Pro API에는 반영되지 않습니다(제휴사에 필드 확장 요청 필요)</small>}<textarea rows={4} value={project.referenceText} onChange={e=>patchLocal({referenceText:e.target.value})} placeholder="광고주가 제공한 핵심 정보나 반드시 반영할 내용을 입력하세요." disabled={project.medicalReview.locked}/></label>
+        <label>참고자료<textarea rows={4} value={project.referenceText} onChange={e=>patchLocal({referenceText:e.target.value})} placeholder="광고주가 제공한 핵심 정보나 반드시 반영할 내용을 입력하세요." disabled={project.medicalReview.locked}/></label>
         <div className="blog26-options">
           <label><input type="checkbox" checked={project.options.style} onChange={e=>patchLocal({options:{...project.options,style:e.target.checked}})}/> 기존 문체 반영</label>
           <label><input type="checkbox" checked={project.options.advertiserInfo} onChange={e=>patchLocal({options:{...project.options,advertiserInfo:e.target.checked}})}/> 광고주 정보 반영</label>
@@ -480,7 +489,7 @@ function BlogDashboard({advertisers,projects,allProjects,selectedAdvertiser,setS
     published:scopedProjects.filter(p=>p.status==='published').length,
     warnings:scopedProjects.reduce((n,p)=>n+(p.complianceIssues?.filter(x=>x.severity!=='info').length||0),0)
   };
-  return <div className="blog26-page"><PageHeader title="블로그 제작" description="광고주별 콘텐츠 제작부터 SEO·업종별 규정 검수·의료광고 심의 관리까지 한곳에서 진행합니다." action={<button className="btn primary" onClick={onCreate} disabled={!advertisers.length}><Plus size={15}/> 새 블로그 제작</button>}/><AutopostProStatusBanner aiStatus={aiStatus}/>{notice&&<div className="blog26-notice">{notice}</div>}
+  return <div className="blog26-page"><PageHeader title="블로그 제작" description="광고주별 콘텐츠 제작부터 SEO·업종별 규정 검수·의료광고 심의 관리까지 한곳에서 진행합니다." action={null}/><AutopostProStatusBanner aiStatus={aiStatus}/>{notice&&<div className="blog26-notice">{notice}</div>}
     {!advertisers.length?<section className="card blog26-zero"><Sparkles size={36}/><h2>아직 등록된 광고주가 없습니다.</h2><p>HOWTOM 유니버스는 샘플 데이터 없이 시작합니다. 광고주를 먼저 등록하면 블로그 제작 워크스페이스를 사용할 수 있습니다.</p><a className="btn primary" href={`${import.meta.env.VITE_UNIVERSE_URL || 'http://localhost:3000'}/advertisers`}><Plus size={15}/> 유니버스에서 광고주 등록</a></section>:<>
     <section className="blog26-kpis">{[['이번 달 제작',counts.month],['작성 중',counts.writing],['검토 필요',counts.review],['발행 완료',counts.published],['규정 경고',counts.warnings]].map(([label,value])=><article className="card" key={String(label)}><span>{label}</span><b>{value}</b></article>)}</section>
     <section className="card blog26-dashboard-toolbar"><div className="blog26-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="제목·키워드 검색"/></div>{isAdvertiserAccount
@@ -604,7 +613,7 @@ function AutopostProPanel({project,advertiser,seat,industryCode}:{project:BlogPr
       {seat&&<div><span>좌석 상태</span><b>{seat.status==='active'?'정상':seat.status}</b></div>}
       <div><span>이번 생성 과금</span><b>{billingLabel}</b></div>
     </div>
-    <p className="blog26-muted">톤앤매너·문체 규칙 등 HOWTOM 자체 스타일 설정은 오토포스트 Pro API에는 반영되지 않아 여기서는 표시하지 않습니다.</p>
+    
   </section>;
 }
 function AdvertiserPanel({style,onEdit,project,advertiser}:{style:BlogStyleProfile|null;onEdit:()=>void;project:BlogProject;advertiser:ReturnType<typeof useAdvertisers>[0][number]|null}){return <section className="blog26-side-section"><div className="blog26-side-head"><div><b>광고주 정보·문체</b><span>{project.advertiserName}</span></div><button className="btn secondary mini" onClick={onEdit}>문체 편집</button></div><div className="blog26-info-list"><div><span>업종</span><b>{advertiser?.industry||project.industry||'미설정'}</b></div><div><span>전화번호</span><b>{advertiser?.phone||'미설정'}</b></div><div><span>주소</span><b>{advertiser?.address||'미설정'}</b></div><div><span>홈페이지</span><b>{advertiser?.website||'미설정'}</b></div><div><span>톤앤매너</span><b>{style?.tone||'미설정'}</b></div><div><span>문체 규칙</span><b>{style?.rules.length||0}개</b></div><div><span>선호 표현</span><b>{style?.preferredPhrases.length||0}개</b></div><div><span>금지 표현</span><b>{style?.prohibitedPhrases.length||0}개</b></div><div><span>기본 CTA</span><b>{style?.cta||'미설정'}</b></div><div><span>학습 참고 원문</span><b>{style?.sourceTexts.length||0}개</b></div></div><p className="blog26-muted">광고주 기본 정보와 문체 프로필을 콘텐츠 생성·검수의 컨텍스트로 사용합니다.</p></section>}

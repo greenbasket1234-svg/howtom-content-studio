@@ -992,6 +992,16 @@ async function callBlogGenerationProvider(brief) {
     }
 
     try {
+      // 광고주 문체 프로필 로드 (style_samples용)
+      const styleRow = await pgPool.query('SELECT data FROM blog_styles WHERE tenant_id=$1 AND advertiser_id::text=$2 LIMIT 1', [tenantId, brief.advertiserId]).catch(()=>({rows:[]}));
+      const styleProfile = styleRow.rows[0]?.data || {};
+      // style_samples: sourceTexts에서 최대 2개, 편당 4000자 이내
+      const rawSources = Array.isArray(styleProfile.sourceTexts) ? styleProfile.sourceTexts : [];
+      const styleSamples = rawSources.slice(0, 2).map((text, i) => ({
+        title: `참고 글 ${i + 1}`,
+        body: String(text).slice(0, 4000),
+      })).filter(s => s.body.trim().length > 50); // 너무 짧은 것 제외
+
       const reqBody = {
         keyword: brief.primaryKeyword,
         length: mapLengthToAutopostCode(brief.length ?? brief.targetLength),
@@ -1000,9 +1010,12 @@ async function callBlogGenerationProvider(brief) {
           : (Number.isFinite(Number(brief.numImages))
               ? Math.max(0, Number(brief.numImages))
               : (mapIndustryToAutopostCode(advertiser) === 'moving' ? 5 : 1)),
-        // include_tags: true → 본문 끝에 해시태그 단락 삽입
         include_tags: true,
         confirm_overage: Boolean(brief.confirmOverage),
+        // 참고자료(notes): 광고주가 반영 요청한 핵심 정보 (max 1000자)
+        ...(brief.referenceText?.trim() ? { notes: brief.referenceText.trim().slice(0, 1000) } : {}),
+        // 문체 샘플: 광고주 기존 글에서 문장·어휘 스타일 학습 (max 2편)
+        ...(styleSamples.length ? { style_samples: styleSamples } : {}),
         ...(photosPayload.length ? { photos: photosPayload } : {}),
       };
       const draft = await autopostProRequest('POST', `/v1/seats/${seatRow.seat_id}/drafts`, reqBody,
@@ -1056,6 +1069,8 @@ async function callBlogGenerationProvider(brief) {
         imageLibraryPick: imagePick,
         // photo_warnings는 신규 서버에서 항상 반환됩니다(빈 배열 포함). 없으면 구버전 서버.
         photoWarnings: Array.isArray(draft.photo_warnings) ? draft.photo_warnings : [],
+        // style_warnings: 문체 샘플에 광고규정 위반 소지 표현이 있을 때 경고 배열
+        styleWarnings: Array.isArray(draft.style_warnings) ? draft.style_warnings : [],
       };
     } catch (error) {
       if (error.code === 'overage_confirm_required') { const e = new Error(error.message); e.code = 'overage_confirm_required'; e.status = 409; throw e; }
