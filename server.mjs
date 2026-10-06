@@ -1376,19 +1376,34 @@ async function resolveAuthContext(req) {
   // Case 1) sub가 없는 토큰 - Content Studio 자신이 발급했다고 주장하는 형태
   if (payload.sub === undefined || payload.sub === null) {
     if (payload.isAdvertiserAccount) {
-      // 광고주 계정 주장 - email+advertiserId 조합이 지금도 실제로 유효하고 활성 상태인지
-      // DB로 재확인합니다. 토큰의 advertiserId를 그대로 믿지 않고, 그 이메일 계정이
-      // 지금 실제로 그 광고주에 배정되어 있는지까지 함께 확인합니다.
-      if (!payload.email || !payload.advertiserId || !pgPool) return null;
+      // 광고주 계정 주장 - email + 광고주 ID 조합이 유효한지 DB로 재확인합니다.
+      // 복수 브랜드 관리 계정: advertiserIds 배열 또는 advertiserId 단일값을 모두 처리합니다.
+      if (!payload.email || !pgPool) return null;
+      const allAdvIds = Array.isArray(payload.advertiserIds) && payload.advertiserIds.length > 0
+        ? payload.advertiserIds
+        : payload.advertiserId ? [payload.advertiserId] : [];
+      if (!allAdvIds.length) return null;
+
+      // 이메일 계정이 활성 상태이고 해당 광고주 중 하나라도 속해 있으면 허용합니다.
       const acctRes = await pgPool.query(
-        `SELECT u.status FROM app_users u JOIN app_memberships m ON m.user_id = u.id
-         WHERE u.email = $1 AND u.is_advertiser_account = true AND u.status = 'active' AND $2 = ANY(m.advertiser_ids)`,
-        [String(payload.email).toLowerCase(), payload.advertiserId]
+        `SELECT u.status, m.advertiser_ids FROM app_users u JOIN app_memberships m ON m.user_id = u.id
+         WHERE u.email = $1 AND u.is_advertiser_account = true AND u.status = 'active'
+           AND m.advertiser_ids && $2::text[]`,
+        [String(payload.email).toLowerCase(), allAdvIds]
       );
       if (!acctRes.rows[0]) return null;
-      const sub = await pgPool.query('SELECT plan_name FROM advertiser_subscriptions WHERE advertiser_id = $1', [payload.advertiserId]);
-      const tier = portalTierFromPlanName(sub.rows[0]?.plan_name || '');
-      return { type: 'advertiser', email: payload.email, name: payload.name, advertiserIds: [payload.advertiserId], permissionKeys: [], tier };
+
+      // 모든 브랜드의 구독 등급을 확인하고 최대값을 사용합니다.
+      let tier = 0;
+      for (const advId of allAdvIds) {
+        const subRow = await pgPool.query(
+          'SELECT plan_name FROM advertiser_subscriptions WHERE advertiser_id::text = $1 ORDER BY updated_at DESC LIMIT 1',
+          [advId]
+        );
+        const t = portalTierFromPlanName(subRow.rows[0]?.plan_name || '');
+        if (t > tier) tier = t;
+      }
+      return { type: 'advertiser', email: payload.email, name: payload.name, advertiserIds: allAdvIds, permissionKeys: [], tier };
     }
     // owner(관리자) 주장 - 지금 설정된 ADMIN_EMAIL과 정확히 일치할 때만 인정합니다.
     // 환경변수를 바꾸면(관리자 교체) 예전 토큰은 여기서 자동으로 무효화됩니다.
