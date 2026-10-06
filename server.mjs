@@ -1587,7 +1587,8 @@ const server = http.createServer(async (req, res) => {
             if (staffTier < 3) {
               return sendJson(res, 403, { error: '콘텐츠 제작소는 CONTENT PRO 구독에서 이용할 수 있습니다.' });
             }
-            const token = signToken({ email, name: staff.name, isAdvertiserAccount: false, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
+            // sub를 포함해야 resolveAuthContext Case 2(Universe 토큰 흐름)에서 검증됩니다.
+            const token = signToken({ sub: staff.id, email, name: staff.name, isAdvertiserAccount: false, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 });
             return sendJson(res, 200, { token, user: { email, name: staff.name } });
           }
         }
