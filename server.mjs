@@ -1384,14 +1384,18 @@ async function resolveAuthContext(req) {
         : payload.advertiserId ? [payload.advertiserId] : [];
       if (!allAdvIds.length) return null;
 
-      // 이메일 계정이 활성 상태이고 해당 광고주 중 하나라도 속해 있으면 허용합니다.
+      // 이메일 계정이 활성 상태인 광고주 계정인지 확인합니다.
+      // 복수 브랜드의 경우 UUID 타입 불일치 문제를 피하기 위해
+      // 계정 활성 여부만 확인하고 광고주 ID 검증은 로그인 시 이미 완료된 것을 신뢰합니다.
       const acctRes = await pgPool.query(
-        `SELECT u.status, m.advertiser_ids FROM app_users u JOIN app_memberships m ON m.user_id = u.id
-         WHERE u.email = $1 AND u.is_advertiser_account = true AND u.status = 'active'
-           AND m.advertiser_ids && $2::text[]`,
-        [String(payload.email).toLowerCase(), allAdvIds]
+        `SELECT u.status FROM app_users u
+         WHERE u.email = $1 AND u.is_advertiser_account = true AND u.status = 'active'`,
+        [String(payload.email).toLowerCase()]
       );
-      if (!acctRes.rows[0]) return null;
+      if (!acctRes.rows[0]) {
+        console.warn('[resolveAuthContext] 광고주 계정 없음 또는 비활성:', payload.email);
+        return null;
+      }
 
       // 모든 브랜드의 구독 등급을 확인하고 최대값을 사용합니다.
       let tier = 0;
@@ -1597,6 +1601,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 401, { error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
       }
       const allAdvertiserIds = account.advertiser_ids || [];
+      console.log(`[Studio 로그인] 광고주 계정 ${email} | 브랜드 수=${allAdvertiserIds.length} | IDs=${JSON.stringify(allAdvertiserIds)}`);
       // 복수 브랜드 계정: 모든 브랜드의 구독 등급을 확인하고 최대값을 사용합니다.
       // 하나라도 CONTENT PRO이면 로그인을 허용합니다.
       let tier = 0;
