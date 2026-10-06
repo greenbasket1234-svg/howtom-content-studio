@@ -379,7 +379,15 @@ export function BlogProductionPage(){
         {aiStatus?.provider==='autopost-pro'&&<label>본문 이미지 자리 수<input type="number" min={0} max={8} value={numImages} onChange={e=>setNumImages(Math.max(0,Math.min(8,Number(e.target.value)||0)))} disabled={project.medicalReview.locked}/></label>}
         <label>발행 예정일<input type="date" value={project.scheduledAt?.slice(0,10)||''} onChange={e=>patchLocal({scheduledAt:e.target.value})}/></label>
         <label>톤앤매너{aiStatus?.provider==='autopost-pro'&&<small className="blog26-field-note"> · 내부 참고용</small>}<select value={project.tone} onChange={e=>patchLocal({tone:e.target.value})} disabled={project.medicalReview.locked}><option>광고주 문체 자동 적용</option><option>친절한 전문가형</option><option>정보 중심형</option><option>부드러운 상담형</option><option>간결한 실무형</option></select></label>
-        <label>참고자료<textarea rows={4} value={project.referenceText} onChange={e=>patchLocal({referenceText:e.target.value})} placeholder="광고주가 제공한 핵심 정보나 반드시 반영할 내용을 입력하세요." disabled={project.medicalReview.locked}/></label>
+        <label>
+          <span style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span>참고자료</span>
+            <small style={{color: (project.referenceText?.length||0)>=1000?'#dc2626':'#94a3b8', fontSize:11}}>
+              {project.referenceText?.length||0} / 1,000자 (공백 포함)
+            </small>
+          </span>
+          <textarea rows={4} value={project.referenceText} onChange={e=>patchLocal({referenceText:e.target.value.slice(0,1000)})} placeholder="광고주가 제공한 핵심 정보나 반드시 반영할 내용을 입력하세요. (최대 1,000자)" disabled={project.medicalReview.locked}/>
+        </label>
         <div className="blog26-options">
           <label><input type="checkbox" checked={project.options.style} onChange={e=>patchLocal({options:{...project.options,style:e.target.checked}})}/> 기존 문체 반영</label>
           <label><input type="checkbox" checked={project.options.advertiserInfo} onChange={e=>patchLocal({options:{...project.options,advertiserInfo:e.target.checked}})}/> 광고주 정보 반영</label>
