@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { ctxCanAccessAdvertiser } from './lib/studioHelpers.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4100);
@@ -1139,15 +1140,23 @@ function sendJson(res, status, body) {
 async function readJson(req) {
   return await new Promise((resolve, reject) => {
     let raw = '';
+    let responded = false;
     req.on('data', chunk => {
       raw += chunk;
-      if (raw.length > 1024 * 1024) reject(new Error('요청 본문이 너무 큽니다.'));
+      if (raw.length > 1024 * 1024 && !responded) {
+        responded = true;
+        req.destroy();
+        const err = new Error('요청 본문이 너무 큽니다.');
+        err.status = 413;
+        reject(err);
+      }
     });
     req.on('end', () => {
+      if (responded) return;
       if (!raw) return resolve({});
       try { resolve(JSON.parse(raw)); } catch { reject(new Error('JSON 형식이 올바르지 않습니다.')); }
     });
-    req.on('error', reject);
+    req.on('error', err => { if (!responded) reject(err); });
   });
 }
 // ── AI 생성 (광고 제작/영상 대본/문서 작성) - HOWTOM Universe와 완전히 같은 방식입니다.
@@ -1465,12 +1474,7 @@ async function resolveAuthContext(req) {
   return { type: 'staff', email: payload.email, advertiserIds: row.advertiser_ids || null, permissionKeys, tier: 3 };
 }
 
-/** ctx.advertiserIds가 null이면 전체 허용, 배열이면 그 안에 포함될 때만 허용합니다. */
-function ctxCanAccessAdvertiser(ctx, advertiserId) {
-  if (!ctx || !advertiserId) return false;
-  if (ctx.advertiserIds === null) return true;
-  return ctx.advertiserIds.includes(advertiserId);
-}
+// ctxCanAccessAdvertiser → lib/studioHelpers.mjs 에서 import됩니다.
 function requireDb(res) {
   if (!pgPool) {
     sendJson(res, 503, { error: 'DATABASE_URL이 설정되지 않아 데이터베이스 기능을 사용할 수 없습니다.' });
@@ -1858,12 +1862,18 @@ const server = http.createServer(async (req, res) => {
         const duplicateMatch = pathname.match(/^\/api\/templates\/([^/]+)\/duplicate$/);
         if (duplicateMatch && req.method === 'POST') {
           const id = decodeURIComponent(duplicateMatch[1]);
-          const cur = await pgPool.query(`SELECT advertiser_id, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, advertiser_id::text AS advertiser_id_str, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
-          if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          if (cur.rows[0].advertiser_id_str && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id_str)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           const source = cur.rows[0].data;
           const row = normalizeTemplate({ ...source, name: `${source.name} 복사본`, useCount: 0, isFavorite: false }, null);
           row.templateId = makeId('tpl');
+          // Task 8: 비어드민이 공용 템플릿(advertiserId가 없음)을 복제하면 공용으로 만들 수 없습니다.
+          // 첫 번째 담당 광고주로 강제 지정해 개인/브랜드 전용 템플릿으로 전환합니다.
+          if (payload.advertiserIds !== null && !row.advertiserId) {
+            row.advertiserId = payload.advertiserIds[0] || null;
+            if (!row.advertiserId) return sendJson(res, 403, { error: '공용 템플릿 복제는 담당 광고주가 있어야 합니다.' });
+          }
           const advertiserUuid = row.advertiserId ? (await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId])).rows[0]?.id || null : null;
           await pgPool.query(`INSERT INTO content_templates (id, tenant_id, advertiser_id, template_type, data) VALUES ($1,$2,$3,$4,$5)`, [row.templateId, tenantId, advertiserUuid, row.templateType, JSON.stringify(row)]);
           return sendJson(res, 201, row);
@@ -1872,15 +1882,20 @@ const server = http.createServer(async (req, res) => {
         const versionMatch = pathname.match(/^\/api\/templates\/([^/]+)\/new-version$/);
         if (versionMatch && req.method === 'POST') {
           const id = decodeURIComponent(versionMatch[1]);
-          const cur = await pgPool.query(`SELECT advertiser_id, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT advertiser_id, advertiser_id::text AS advertiser_id_str, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
-          if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
+          if (cur.rows[0].advertiser_id_str && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id_str)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           const source = cur.rows[0].data;
           const rootId = source.parentTemplateId || source.templateId;
           const related = await pgPool.query(`SELECT data FROM content_templates WHERE tenant_id=$1 AND (id=$2 OR data->>'parentTemplateId'=$2)`, [tenantId, rootId]);
           const maxVersion = Math.max(1, ...related.rows.map(r => Number(r.data?.version) || 1));
           const row = normalizeTemplate({ ...source, version: maxVersion + 1, parentTemplateId: rootId, useCount: 0 }, null);
           row.templateId = makeId('tpl');
+          // Task 8: 비어드민이 공용 템플릿의 새 버전을 만들면 공용으로 만들 수 없습니다.
+          if (payload.advertiserIds !== null && !row.advertiserId) {
+            row.advertiserId = payload.advertiserIds[0] || null;
+            if (!row.advertiserId) return sendJson(res, 403, { error: '공용 템플릿 버전 생성은 담당 광고주가 있어야 합니다.' });
+          }
           const advertiserUuid = row.advertiserId ? (await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, row.advertiserId])).rows[0]?.id || null : null;
           await pgPool.query(`INSERT INTO content_templates (id, tenant_id, advertiser_id, template_type, data) VALUES ($1,$2,$3,$4,$5)`, [row.templateId, tenantId, advertiserUuid, row.templateType, JSON.stringify(row)]);
           return sendJson(res, 201, row);
@@ -2225,6 +2240,10 @@ const server = http.createServer(async (req, res) => {
         const refMatch = pathname.match(/^\/api\/references\/([^/]+)$/);
         if (refMatch && req.method === 'PATCH') {
           const id = decodeURIComponent(refMatch[1]);
+          const refRow = await pgPool.query(`SELECT advertiser_id::text AS advertiser_id FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!refRow.rows[0]) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          if (refRow.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, refRow.rows[0].advertiser_id)) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          if (!refRow.rows[0].advertiser_id && payload.advertiserIds !== null) return sendJson(res, 403, { error: '공용 레퍼런스는 수정 권한이 없습니다.' });
           const body = await readJson(req);
           const sets = []; const params = [tenantId, id];
           if (body.memo !== undefined) { params.push(cleanText(body.memo, 1000)); sets.push(`memo=$${params.length}`); }
@@ -2235,6 +2254,10 @@ const server = http.createServer(async (req, res) => {
         }
         if (refMatch && req.method === 'DELETE') {
           const id = decodeURIComponent(refMatch[1]);
+          const refRow = await pgPool.query(`SELECT advertiser_id::text AS advertiser_id FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!refRow.rows[0]) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          if (refRow.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, refRow.rows[0].advertiser_id)) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          if (!refRow.rows[0].advertiser_id && payload.advertiserIds !== null) return sendJson(res, 403, { error: '공용 레퍼런스는 삭제 권한이 없습니다.' });
           await pgPool.query(`DELETE FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
         }
@@ -2244,9 +2267,11 @@ const server = http.createServer(async (req, res) => {
         if (refAnalyzeMatch && req.method === 'POST') {
           if (!aiConfigured()) return sendJson(res, 400, { error: 'AI가 연결되지 않았습니다. 관리자가 AI_PROVIDER/AI_API_KEY를 설정해야 합니다.' });
           const id = decodeURIComponent(refAnalyzeMatch[1]);
-          const cur = await pgPool.query(`SELECT * FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          const cur = await pgPool.query(`SELECT *, advertiser_id::text AS advertiser_id_str FROM content_references WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           const ref = cur.rows[0];
           if (!ref) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          if (ref.advertiser_id_str && !ctxCanAccessAdvertiser(payload, ref.advertiser_id_str)) return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          if (!ref.advertiser_id_str && payload.advertiserIds !== null) return sendJson(res, 403, { error: '공용 레퍼런스는 분석 권한이 없습니다.' });
           const contentText = [ref.headline, ref.body, ref.description].filter(Boolean).join('\n');
           if (!contentText.trim()) return sendJson(res, 400, { error: '분석할 텍스트(제목·본문)가 없는 레퍼런스입니다.' });
           const system = `당신은 광고·콘텐츠 카피를 분석하는 전문가입니다. 주어진 광고/콘텐츠 문구를 분석해서 반드시 아래 JSON 형식으로만 응답하세요. 그 외 설명이나 코드블록 표시는 절대 포함하지 마세요.\n{"hookType": "이 콘텐츠가 쓰는 후킹 방식 한 단어(예: 가격 소구, 후기형, 문제제기형, 희소성, 숫자 제시 등)", "keyMessage": "핵심 소구점 한 문장", "ctaAssessment": "CTA(행동유도) 문구에 대한 짧은 평가", "suggestions": ["우리 광고에 참고할 만한 개선 아이디어 1", "개선 아이디어 2", "개선 아이디어 3"]}`;
@@ -2290,6 +2315,9 @@ const server = http.createServer(async (req, res) => {
         const boardMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)$/);
         if (boardMatch && req.method === 'PATCH') {
           const id = decodeURIComponent(boardMatch[1]);
+          const bpatch = await pgPool.query(`SELECT advertiser_id::text AS "aid" FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+          if (!bpatch.rows[0]) return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, bpatch.rows[0].aid)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const body = await readJson(req);
           const name = cleanText(body.name, 120);
           if (!name) return sendJson(res, 400, { error: '보드 이름을 입력하세요.' });
@@ -2306,6 +2334,10 @@ const server = http.createServer(async (req, res) => {
         }
         const boardDetailMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
         if (boardDetailMatch && req.method === 'GET') {
+          const boardId = decodeURIComponent(boardDetailMatch[1]);
+          const bget = await pgPool.query(`SELECT advertiser_id::text AS "aid" FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, boardId]);
+          if (!bget.rows[0]) return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, bget.rows[0].aid)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const r = await pgPool.query(
             `SELECT r.id, r.advertiser_id::text as "advertiserId", a.name as "advertiserName", r.platform, r.external_id as "externalId",
                     r.page_name as "pageName", r.is_competitor as "isCompetitor", r.body, r.headline, r.description, r.cta,
@@ -2315,21 +2347,29 @@ const server = http.createServer(async (req, res) => {
              JOIN content_references r ON r.id = bi.reference_id
              LEFT JOIN advertisers a ON a.id = r.advertiser_id
              WHERE bi.board_id=$1 AND r.tenant_id=$2 ORDER BY bi.added_at DESC`,
-            [decodeURIComponent(boardDetailMatch[1]), tenantId]
+            [boardId, tenantId]
           );
           return sendJson(res, 200, r.rows.map(row => ({ ...row, boards: [] })));
         }
         const boardItemMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items$/);
         if (boardItemMatch && req.method === 'POST') {
+          const boardId = decodeURIComponent(boardItemMatch[1]);
+          const bpost = await pgPool.query(`SELECT advertiser_id::text AS "aid" FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, boardId]);
+          if (!bpost.rows[0]) return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, bpost.rows[0].aid)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const body = await readJson(req);
           const referenceId = cleanText(body.referenceId || '', 120);
           if (!referenceId) return sendJson(res, 400, { error: 'referenceId가 필요합니다.' });
-          await pgPool.query(`INSERT INTO reference_board_items (board_id, reference_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [decodeURIComponent(boardItemMatch[1]), referenceId]);
+          await pgPool.query(`INSERT INTO reference_board_items (board_id, reference_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [boardId, referenceId]);
           return sendJson(res, 200, { ok: true });
         }
         const boardItemRemoveMatch = pathname.match(/^\/api\/reference-boards\/([^/]+)\/items\/([^/]+)$/);
         if (boardItemRemoveMatch && req.method === 'DELETE') {
-          await pgPool.query(`DELETE FROM reference_board_items WHERE board_id=$1 AND reference_id=$2`, [decodeURIComponent(boardItemRemoveMatch[1]), decodeURIComponent(boardItemRemoveMatch[2])]);
+          const boardId = decodeURIComponent(boardItemRemoveMatch[1]);
+          const brem = await pgPool.query(`SELECT advertiser_id::text AS "aid" FROM reference_boards WHERE tenant_id=$1 AND id=$2`, [tenantId, boardId]);
+          if (!brem.rows[0]) return sendJson(res, 404, { error: '보드를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, brem.rows[0].aid)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          await pgPool.query(`DELETE FROM reference_board_items WHERE board_id=$1 AND reference_id=$2`, [boardId, decodeURIComponent(boardItemRemoveMatch[2])]);
           return sendJson(res, 200, { ok: true });
         }
 
@@ -2351,6 +2391,7 @@ const server = http.createServer(async (req, res) => {
           const body = await readJson(req);
           const brandName = cleanText(body.brandName, 120);
           if (!brandName || !body.advertiserId) return sendJson(res, 400, { error: '광고주와 경쟁 브랜드명을 입력하세요.' });
+          if (!ctxCanAccessAdvertiser(payload, body.advertiserId)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
           const advRes = await pgPool.query(`SELECT id FROM advertisers WHERE tenant_id=$1 AND id::text=$2`, [tenantId, body.advertiserId]);
           if (!advRes.rows[0]) return sendJson(res, 400, { error: '선택한 광고주를 찾을 수 없습니다.' });
           const id = makeId('competitor');
@@ -2359,7 +2400,11 @@ const server = http.createServer(async (req, res) => {
         }
         const competitorMatch = pathname.match(/^\/api\/reference-competitors\/([^/]+)$/);
         if (competitorMatch && req.method === 'DELETE') {
-          await pgPool.query(`DELETE FROM reference_competitors WHERE tenant_id=$1 AND id=$2`, [tenantId, decodeURIComponent(competitorMatch[1])]);
+          const cid = decodeURIComponent(competitorMatch[1]);
+          const ccheck = await pgPool.query(`SELECT advertiser_id::text AS "aid" FROM reference_competitors WHERE tenant_id=$1 AND id=$2`, [tenantId, cid]);
+          if (!ccheck.rows[0]) return sendJson(res, 404, { error: '경쟁 브랜드를 찾을 수 없습니다.' });
+          if (!ctxCanAccessAdvertiser(payload, ccheck.rows[0].aid)) return sendJson(res, 403, { error: '이 광고주에 접근할 권한이 없습니다.' });
+          await pgPool.query(`DELETE FROM reference_competitors WHERE tenant_id=$1 AND id=$2`, [tenantId, cid]);
           return sendJson(res, 200, { ok: true });
         }
       }
@@ -2429,6 +2474,8 @@ const server = http.createServer(async (req, res) => {
           const id = decodeURIComponent(projectMatch[1]);
           const r = await pgPool.query(`SELECT id, advertiser_id::text as advertiser_id, data FROM blog_projects WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!r.rows[0]) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+          // advertiser_id가 null인 고아 데이터는 owner/admin만 접근 가능합니다(Task 7).
+          if (r.rows[0].advertiser_id === null && payload.advertiserIds !== null) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           if (r.rows[0].advertiser_id !== null && !ctxCanAccessAdvertiser(payload, r.rows[0].advertiser_id)) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           return sendJson(res, 200, { ...(r.rows[0].data || {}), projectId: r.rows[0].id });
         }
@@ -2462,8 +2509,10 @@ const server = http.createServer(async (req, res) => {
           );
           if (!cur.rows[0]) return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           const advId = cur.rows[0].advertiser_id;
-          // advertiser_id가 null인 경우(광고주 삭제·구버전 데이터)는 소유권 검사를 건너뜁니다.
-          // null이 아닌 경우에만 광고주 접근 권한을 확인합니다.
+          // advertiser_id가 null인 고아 데이터는 owner/admin만 접근 가능합니다(Task 7).
+          if (advId === null && payload.advertiserIds !== null) {
+            return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
+          }
           if (advId !== null && !ctxCanAccessAdvertiser(payload, advId)) {
             return sendJson(res, 404, { error: '블로그 프로젝트를 찾을 수 없습니다.' });
           }
@@ -2713,27 +2762,31 @@ const server = http.createServer(async (req, res) => {
           }
 
           let genResult;
-          // awaiting_overage 상태에서 confirmOverage=true로 재개하면 이미 processing으로
-          // 전환했으므로 INSERT lockResult 블록을 건너뜁니다.
-          let alreadyLocked = false;
+          // processingLeaseAcquired = true → 이 요청이 처리권을 확보했음을 나타냅니다.
+          // true일 때만 callBlogGenerationProvider를 호출합니다.
+          let processingLeaseAcquired = false;
           if (reqRow?.status === 'ai_completed') {
             // AI는 이미 과거 요청에서 성공했으므로, HOWTOM 자체 한도도 지금 확정합니다.
             genResult = sanitizeDeep({ ...reqRow.result, billing: reqRow.billing });
             await confirmUsageReservation(blogUsageReservation.event?.id);
-            alreadyLocked = true; // 처리권 확보 불필요, INSERT 블록 건너뜀
+            // processingLeaseAcquired는 false 유지 → 생성 블록 건너뜀
           } else if (reqRow?.status === 'awaiting_overage' && brief.confirmOverage) {
-            // confirmOverage=true → processing으로 전환해 즉시 재개합니다(중복 실행 방지).
-            await pgPool.query(
-              `UPDATE blog_generation_requests SET status='processing', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2 AND status='awaiting_overage'`,
+            // confirmOverage=true → RETURNING을 이용해 원자적으로 processing으로 전환합니다.
+            // 별도의 SELECT 재확인 없이 RETURNING 행 수로 경쟁 여부를 판단합니다
+            // (SELECT 후 판단은 두 요청이 모두 awaiting_overage를 읽어 양쪽 다 실행하는
+            //  경쟁 조건이 있었습니다).
+            const overageLock = await pgPool.query(
+              `UPDATE blog_generation_requests SET status='processing', updated_at=now()
+               WHERE tenant_id=$1 AND idempotency_key=$2 AND status='awaiting_overage'
+               RETURNING idempotency_key`,
               [tenantId, idempotencyKey]
             );
-            const recheck = await pgPool.query('SELECT status FROM blog_generation_requests WHERE tenant_id=$1 AND idempotency_key=$2', [tenantId, idempotencyKey]);
-            if (recheck.rows[0]?.status !== 'processing') {
+            if (overageLock.rows.length === 0) {
               return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
             }
-            alreadyLocked = true; // 처리권 이미 확보 완료 → INSERT 블록 건너뜀
+            processingLeaseAcquired = true; // 처리권 확보 완료 → 생성 블록 진입
           }
-          if (!alreadyLocked) {
+          if (!processingLeaseAcquired && !genResult) {
             // 외부 호출 전에 먼저 "처리 중" 상태를 원자적으로 등록합니다(UNIQUE 제약이
             // 동시 등록을 막아줍니다) - 같은 키로 동시에 두 요청이 들어와도 AI가 두 번
             // 호출되지 않습니다.
@@ -2756,6 +2809,16 @@ const server = http.createServer(async (req, res) => {
                 // 방금 우리보다 먼저 processing을 잡은 요청이 있습니다.
                 return sendJson(res, 409, { error: '같은 요청이 이미 처리 중입니다. 잠시 후 다시 시도해주세요.', code: 'already_processing' });
               }
+              processingLeaseAcquired = true;
+            } catch (error) {
+              await pgPool.query(`UPDATE blog_generation_requests SET status='failed', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
+              await refundUsageReservation(blogUsageReservation.event?.id);
+              return sendJson(res, error?.status || 502, { error: error instanceof Error ? error.message : 'AI 원고 생성에 실패했습니다.', code: error?.code });
+            }
+          }
+          if (processingLeaseAcquired) {
+            // 처리권을 확보한 경우에만 AI 생성을 호출합니다(awaiting_overage 재개 경로 포함).
+            try {
               const brief2 = { ...brief };
               genResult = sanitizeDeep(await callBlogGenerationProvider(brief2));
               await pgPool.query(
@@ -2765,12 +2828,16 @@ const server = http.createServer(async (req, res) => {
               // 오토포스트 Pro 호출이 성공했으니 HOWTOM 자체 월간 한도도 이제 확정합니다.
               await confirmUsageReservation(blogUsageReservation.event?.id);
             } catch (error) {
-              // 확실한 실패입니다(외부 공급사가 에러를 반환) - failed로 표시해 재시도를 허용합니다.
               // 초과 과금 확인이 필요한 409는 "실패"가 아니라 "사용자 결정 대기"이므로
               // awaiting_overage 상태로 전환합니다 - 그래야 같은 키로 confirmOverage=true로
               // 재시도했을 때 5분 대기 없이 즉시 처리권을 확보할 수 있습니다.
-              // HOWTOM 자체 한도 예약도 같은 원칙: 확실한 실패면 반환, 동의 대기면 pending 유지.
+              // awaiting_overage에서 재개한 경로에서 에러가 발생하면 다시 awaiting_overage로
+              // 복구합니다(일반 에러여도 failed 대신 awaiting_overage 유지 — 이미 동의가
+              // 완료된 요청이므로 다시 동의 없이 재시도할 수 있어야 합니다).
               if (error?.code === 'overage_confirm_required') {
+                await pgPool.query(`UPDATE blog_generation_requests SET status='awaiting_overage', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
+              } else if (reqRow?.status === 'awaiting_overage') {
+                // 이미 사용자 동의를 받은 overage 경로 — failed 대신 awaiting_overage 복구
                 await pgPool.query(`UPDATE blog_generation_requests SET status='awaiting_overage', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});
               } else {
                 await pgPool.query(`UPDATE blog_generation_requests SET status='failed', updated_at=now() WHERE tenant_id=$1 AND idempotency_key=$2`, [tenantId, idempotencyKey]).catch(() => {});

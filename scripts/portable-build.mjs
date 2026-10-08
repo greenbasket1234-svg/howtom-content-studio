@@ -18,8 +18,11 @@ const importMap = { imports: {
   react: 'https://esm.sh/react@18.3.1',
   'react/': 'https://esm.sh/react@18.3.1/',
   'react-dom': 'https://esm.sh/react-dom@18.3.1?external=react',
+  'react-dom/': 'https://esm.sh/react-dom@18.3.1/',
   'react-dom/client': 'https://esm.sh/react-dom@18.3.1/client?external=react',
   'react-router-dom': 'https://esm.sh/react-router-dom@6.26.2?external=react,react-dom',
+  'lucide-react': 'https://esm.sh/lucide-react@0.383.0?external=react',
+  dompurify: 'https://esm.sh/dompurify@3.4.13',
 } };
 
 function walk(dir) {
