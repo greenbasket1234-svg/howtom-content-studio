@@ -22,4 +22,6 @@ if (!nativeRollupMissing) {
 
 console.warn('[안내] 현재 OS용 Rollup optional dependency가 없어 portable ESM build로 검증합니다.');
 const fallback = spawnSync(process.execPath, ['scripts/portable-build.mjs'], { stdio: 'inherit' });
-process.exit(fallback.status || 0);
+// P1: signal로 종료된 경우(fallback.status === null)는 0이 아닌 1로 종료합니다.
+if (fallback.status === null) process.exit(1);
+process.exit(fallback.status);

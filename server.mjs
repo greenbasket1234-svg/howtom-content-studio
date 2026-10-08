@@ -1444,7 +1444,7 @@ async function resolveAuthContext(req) {
   // Case 2) sub가 있는 토큰 - Universe에서 발급됨(직원 또는 Universe owner)
   if (!pgPool) return null;
   const result = await pgPool.query(
-    `SELECT u.id, u.status, u.is_advertiser_account, m.role_ids, m.advertiser_ids
+    `SELECT u.id, u.status, u.is_advertiser_account, m.id AS membership_id, m.role_ids, m.advertiser_ids
      FROM app_users u LEFT JOIN app_memberships m ON m.user_id = u.id WHERE u.id::text = $1`,
     [String(payload.sub)]
   );
@@ -1464,6 +1464,10 @@ async function resolveAuthContext(req) {
     // 클레임이 위조된 토큰) - 신뢰하지 않고 거부합니다. 재로그인을 요구해야 합니다.
     return null;
   }
+  // 멤버십 레코드가 없는 직원은 접근 불허합니다.
+  // LEFT JOIN 결과 membership_id가 null이면 advertiserIds=null이 되어 전체 광고주 접근으로
+  // 오인되는 BOLA 취약점을 차단합니다.
+  if (!row.membership_id) return null;
   let permissionKeys = [];
   if (row.role_ids?.length) {
     const roles = await pgPool.query('SELECT permission_keys FROM app_roles WHERE id = ANY($1::uuid[])', [row.role_ids]);
@@ -1842,8 +1846,10 @@ const server = http.createServer(async (req, res) => {
           const patch = await readJson(req);
           const cur = await pgPool.query(`SELECT advertiser_id, data FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!cur.rows[0]?.data) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
-          // 공용 템플릿(advertiser_id IS NULL)은 owner/전체권한 staff만 수정 가능합니다.
-          if (!cur.rows[0].advertiser_id && payload.advertiserIds !== null) return sendJson(res, 403, { error: '공용 템플릿은 수정 권한이 없습니다.' });
+          // 공용 템플릿(advertiser_id IS NULL)은 owner 또는 settings.manage 권한 보유자만 수정 가능합니다.
+          // P1: advertiserIds===null은 "전체 광고주 담당"이지 관리자 권한이 아닙니다.
+          const canEditPublicTemplate = payload.type === 'owner' || (payload.permissionKeys && payload.permissionKeys.includes('settings.manage'));
+          if (!cur.rows[0].advertiser_id && !canEditPublicTemplate) return sendJson(res, 403, { error: '공용 템플릿은 수정 권한이 없습니다.' });
           if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           const updated = normalizeTemplate(patch, { ...cur.rows[0].data, templateId: id });
           await pgPool.query(`UPDATE content_templates SET template_type=$3, data=$4, updated_at=now() WHERE tenant_id=$1 AND id=$2`, [tenantId, id, updated.templateType, JSON.stringify(updated)]);
@@ -1853,7 +1859,9 @@ const server = http.createServer(async (req, res) => {
           const id = decodeURIComponent(templateMatch[1]);
           const cur = await pgPool.query(`SELECT advertiser_id FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           if (!cur.rows[0]) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
-          if (!cur.rows[0].advertiser_id && payload.advertiserIds !== null) return sendJson(res, 403, { error: '공용 템플릿은 삭제 권한이 없습니다.' });
+          // P1: 공용 템플릿 삭제도 owner 또는 settings.manage 권한 보유자만 가능합니다.
+          const canDeletePublicTemplate = payload.type === 'owner' || (payload.permissionKeys && payload.permissionKeys.includes('settings.manage'));
+          if (!cur.rows[0].advertiser_id && !canDeletePublicTemplate) return sendJson(res, 403, { error: '공용 템플릿은 삭제 권한이 없습니다.' });
           if (cur.rows[0].advertiser_id && !ctxCanAccessAdvertiser(payload, cur.rows[0].advertiser_id)) return sendJson(res, 404, { error: '템플릿을 찾을 수 없습니다.' });
           await pgPool.query(`DELETE FROM content_templates WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
           return sendJson(res, 200, { ok: true });
@@ -1870,7 +1878,9 @@ const server = http.createServer(async (req, res) => {
           row.templateId = makeId('tpl');
           // Task 8: 비어드민이 공용 템플릿(advertiserId가 없음)을 복제하면 공용으로 만들 수 없습니다.
           // 첫 번째 담당 광고주로 강제 지정해 개인/브랜드 전용 템플릿으로 전환합니다.
-          if (payload.advertiserIds !== null && !row.advertiserId) {
+          // P1: 관리자 여부는 type==='owner' 또는 settings.manage 권한으로 판단합니다(advertiserIds===null은 관리자가 아님).
+          const isDupAdmin = payload.type === 'owner' || (payload.permissionKeys && payload.permissionKeys.includes('settings.manage'));
+          if (!isDupAdmin && !row.advertiserId) {
             row.advertiserId = payload.advertiserIds[0] || null;
             if (!row.advertiserId) return sendJson(res, 403, { error: '공용 템플릿 복제는 담당 광고주가 있어야 합니다.' });
           }
@@ -1892,7 +1902,9 @@ const server = http.createServer(async (req, res) => {
           const row = normalizeTemplate({ ...source, version: maxVersion + 1, parentTemplateId: rootId, useCount: 0 }, null);
           row.templateId = makeId('tpl');
           // Task 8: 비어드민이 공용 템플릿의 새 버전을 만들면 공용으로 만들 수 없습니다.
-          if (payload.advertiserIds !== null && !row.advertiserId) {
+          // P1: 관리자 여부는 type==='owner' 또는 settings.manage 권한으로 판단합니다.
+          const isVerAdmin = payload.type === 'owner' || (payload.permissionKeys && payload.permissionKeys.includes('settings.manage'));
+          if (!isVerAdmin && !row.advertiserId) {
             row.advertiserId = payload.advertiserIds[0] || null;
             if (!row.advertiserId) return sendJson(res, 403, { error: '공용 템플릿 버전 생성은 담당 광고주가 있어야 합니다.' });
           }
@@ -2360,6 +2372,22 @@ const server = http.createServer(async (req, res) => {
           const body = await readJson(req);
           const referenceId = cleanText(body.referenceId || '', 120);
           if (!referenceId) return sendJson(res, 400, { error: 'referenceId가 필요합니다.' });
+          // BOLA P0: reference가 현재 tenant에 속하는지, board와 같은 advertiser인지 검증합니다.
+          // 광고주 A 보드에 광고주 B의 reference를 직접 삽입하는 cross-advertiser 접근을 차단합니다.
+          const refCheck = await pgPool.query(
+            `SELECT advertiser_id::text AS "aid", tenant_id FROM content_references WHERE id=$1`,
+            [referenceId]
+          );
+          if (!refCheck.rows[0] || refCheck.rows[0].tenant_id !== tenantId) {
+            return sendJson(res, 404, { error: '레퍼런스를 찾을 수 없습니다.' });
+          }
+          if (!ctxCanAccessAdvertiser(payload, refCheck.rows[0].aid)) {
+            return sendJson(res, 403, { error: '이 레퍼런스에 접근할 권한이 없습니다.' });
+          }
+          // board와 reference의 advertiser가 다르면 거부합니다.
+          if (bpost.rows[0].aid && refCheck.rows[0].aid && bpost.rows[0].aid !== refCheck.rows[0].aid) {
+            return sendJson(res, 400, { error: '보드와 레퍼런스의 광고주가 일치하지 않습니다.' });
+          }
           await pgPool.query(`INSERT INTO reference_board_items (board_id, reference_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [boardId, referenceId]);
           return sendJson(res, 200, { ok: true });
         }
